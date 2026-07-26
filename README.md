@@ -6,7 +6,11 @@ same host to communicate and collaborate on shared tasks.
 ## Install
 
 ```bash
-pi install ./path/to/pi-collab
+# From npm
+pi install npm:pi-collab
+
+# From GitHub
+pi install git:github.com/zurrll/pi-collab@v0.1.0
 ```
 
 Or for development, load directly without installing:

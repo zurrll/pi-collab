@@ -5,7 +5,11 @@ pi 多 Agent 协作扩展。让同一主机上的多个 pi 实例互相通信、
 ## 安装
 
 ```bash
-pi install ./path/to/pi-collab
+# npm 安装
+pi install npm:pi-collab
+
+# GitHub 安装
+pi install git:github.com/zurrll/pi-collab@v0.1.0
 ```
 
 开发时也可以不安装，直接加载：
