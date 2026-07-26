@@ -1,0 +1,29 @@
+{
+  "name": "pi-collab",
+  "version": "0.1.0",
+  "description": "Multi-agent collaboration extension for pi — enables multiple pi instances to communicate and collaborate on shared tasks",
+  "type": "module",
+  "keywords": ["pi-package", "pi-extension", "collaboration", "multi-agent"],
+  "author": "zurrll",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zurrll/pi-collab.git"
+  },
+  "files": [
+    "extensions/",
+    "README.md",
+    "README.zh.md",
+    "VERIFICATION.md"
+  ],
+  "pi": {
+    "extensions": ["./extensions"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  }
+}
