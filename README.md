@@ -54,6 +54,11 @@ Ask the reviewer to review the file package.json. Focus on correctness.
 | `review_by_colleague` | Ask a colleague to review code with structured feedback |
 | `ask_colleague` | (For use by colleagues) Ask a clarifying question back to the delegating peer |
 
+Each tool includes `promptSnippet` and `promptGuidelines` so the LLM receives
+clear guidance on when and how to use them. Tools also have custom TUI rendering
+(`renderCall` / `renderResult`) showing colleague name, task preview, token
+usage, and expandable details.
+
 ### Multi-Round Discussions
 
 Pass a `conversationId` (any short string, e.g. `"auth-refactor"`) to `delegate_to_colleague`.
@@ -76,13 +81,63 @@ with user prompts.
 
 | Command | Description |
 |---------|-------------|
-| `/collab spawn <name>` | Start a headless peer with the given name |
-| `/collab list` | List all registered peers |
+| `/collab spawn <name\|template>` | Start a headless peer. If `<name>` matches a colleague template, loads model/prompt from it. Accepts `--model`, `--prompt`, `--name` flags. |
+| `/collab list` | List all registered peers with status, model, and heartbeat |
 | `/collab stop <name>` | Remove a peer from the registry |
 | `/collab rename <name>` | Rename the current peer |
-| `/collab status [name]` | Show detailed status for a peer |
+| `/collab status [name]` | Show detailed status for a peer (without auth token) |
 | `/collab delegate <name> <task>` | Manually delegate a task to a colleague |
+| `/collab templates` | List available colleague templates |
 | `/collab token` | Show this peer's auth token (share with trusted peers) |
+
+All commands support tab-completion for subcommands, peer names, and template names.
+
+## Colleague Templates
+
+Define reusable peer configurations as `.md` files with frontmatter:
+
+```markdown
+---
+name: reviewer
+description: Code reviewer focused on correctness and security
+model: anthropic/claude-sonnet-4-20250514
+tools: read, bash, edit, write, grep, find, ls
+---
+
+You are a code reviewer. Focus on:
+- Correctness and edge cases
+- Security vulnerabilities
+- Performance implications
+
+Provide structured feedback with severity ratings.
+```
+
+**Locations:**
+- `~/.pi/agent/colleagues/*.md` — global, available in all projects
+- `.pi/colleagues/*.md` — project-local, shared with your team
+
+Project templates override global templates with the same name.
+
+**Usage:**
+```
+/collab spawn reviewer                      # Uses template's model + system prompt
+/collab spawn reviewer --name code-checker  # Override the display name
+/collab spawn reviewer --model openai/gpt-5 # Override the model
+/collab templates                           # List all available templates
+```
+
+## Peer Status Widget
+
+A TUI widget above the editor displays the current mesh state, updated in real-time:
+
+```
+── Peers ──
+● architect (me)  claude-sonnet-4
+◉ reviewer        gpt-5.2          ← busy (processing)
+● dev             deepseek-v3
+```
+
+Status icons: `● idle` (green), `◉ busy` (yellow), `○ unreachable` (dim).
 
 ## Authentication
 
@@ -107,11 +162,15 @@ to the target's PeerRecord, establishing same-user trust.
 ```
 Transport (Unix sockets / Windows named pipes)
     ↓ JSONL envelopes
+Auth (token verification via filesystem trust anchor)
+    ↓
 Protocol (request, response, question, answer, probe, ping)
     ↓
-Tools (delegate, broadcast, review, ask)
+Agent Bridge (injectTask, agent_settled capture, activeAskCount guard)
     ↓
-Agent Bridge (injectTask, agent_settled capture)
+Tools (delegate, broadcast, review, ask_colleague) + Colleague Templates
+    ↓
+TUI (peer status widget, custom tool rendering)
 ```
 
 Probe messages are handled out-of-band at the transport layer — they never
@@ -125,3 +184,5 @@ reach the LLM context window, making peer discovery free.
 - Message source annotation is text-level, not protocol-level (mitigated by strong
   ASCII box markers)
 - No tool-set syncing between peers
+- Single inbound request at a time (`pendingTask` single-slot; concurrent requests
+  queue via the socket accept loop)
