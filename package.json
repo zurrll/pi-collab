@@ -19,7 +19,8 @@
     "extensions/",
     "README.md",
     "README.zh.md",
-    "VERIFICATION.md"
+    "VERIFICATION.md",
+    "LICENSE"
   ],
   "pi": {
     "extensions": [
