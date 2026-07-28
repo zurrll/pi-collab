@@ -273,8 +273,11 @@ async function handleInboundConnection(conn: PeerConnection): Promise<void> {
   }
 
   if (msg.type === "request") {
+    // Look up caller's name for task annotation
+    const callerRecord = first.source ? getPeerById(first.source) : undefined;
+    const callerName = callerRecord?.name ?? "unknown";
     await handleInboundConversationPreRead(conn, msg, peerId, async (payload, askQuestion) => {
-      const taskPrompt = buildTaskPrompt(payload);
+      const taskPrompt = buildTaskPrompt(payload, callerName);
       return agentCtx.injectTask(taskPrompt, askQuestion, config.conversationTimeoutMs)
         .then((text) => ({ result: text }));
     }, reader);
@@ -411,10 +414,11 @@ async function probePeer(targetName: string, capability?: string): Promise<{
   }
 }
 
-function buildTaskPrompt(payload: { operation: string; task: string; focusAreas?: string[] }): string {
+function buildTaskPrompt(payload: { operation: string; task: string; focusAreas?: string[] }, from?: string): string {
+  const who = from ? `FROM ${from}` : "FROM COLLEAGUE AGENT";
   const header = [
     "┌─────────────────────────────────────────────┐",
-    "│  INCOMING TASK FROM COLLEAGUE AGENT        │",
+    `│  INCOMING TASK ${who.padEnd(30)}│`,
     "│  → This is NOT from your user              │",
     "│  → Your response goes to the colleague     │",
     "│  → Be concise and technical                │",
