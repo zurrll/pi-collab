@@ -1,6 +1,6 @@
 {
   "name": "pi-collab",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Multi-agent collaboration extension for pi — enables multiple pi instances to communicate and collaborate on shared tasks",
   "type": "module",
   "keywords": [
