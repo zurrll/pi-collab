@@ -66,6 +66,7 @@ let peerId: string;
 let transport: PeerTransport;
 let listener: PeerListener | undefined;
 let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+let widgetCtx: ExtensionContext | undefined;
 let currentModel = "unknown";
 let authToken = "";
 
@@ -1256,7 +1257,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       return;
     }
 
-    heartbeatTimer = setInterval(() => heartbeatPeer(peerId), config.heartbeatIntervalMs);
+    // Store ctx for periodic widget refresh (picks up new peers from filesystem)
+    widgetCtx = ctx;
+    heartbeatTimer = setInterval(() => {
+      heartbeatPeer(peerId);
+      if (widgetCtx) updatePeerWidget(widgetCtx);
+    }, config.heartbeatIntervalMs);
     pruneStalePeers();
 
     ctx.ui.setTitle(`pi [${config.name}]`);
@@ -1281,6 +1287,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   // ── Shutdown: clean up ──
   pi.on("session_shutdown", async (_event, ctx) => {
     if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = undefined; }
+    widgetCtx = undefined;
     if (listener) { await listener.close(); listener = undefined; }
     authToken = "";
     clearPeerWidget(ctx);
