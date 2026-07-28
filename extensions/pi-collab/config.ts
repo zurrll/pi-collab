@@ -15,6 +15,8 @@ export interface CollabConfig {
   conversationTimeoutMs: number;
   /** Seconds between heartbeat writes. */
   heartbeatIntervalMs: number;
+  /** Comma-separated manual capability tags (e.g. "code-review,typescript"). */
+  capabilities?: string[];
 }
 
 const DEFAULT_NAME = `peer-${process.pid}`;
@@ -27,6 +29,7 @@ export function parseConfig(): CollabConfig {
     name: process.env.PI_COLLAB_NAME || DEFAULT_NAME,
     systemPrompt: process.env.PI_COLLAB_SYSTEM_PROMPT || undefined,
     model: process.env.PI_COLLAB_MODEL || undefined,
+    capabilities: parseCapabilities(process.env.PI_COLLAB_CAPABILITIES),
     defaultMaxTurns: parseOptionalInt(process.env.PI_COLLAB_MAX_TURNS, DEFAULT_MAX_TURNS),
     conversationTimeoutMs: parseOptionalInt(
       process.env.PI_COLLAB_CONVERSATION_TIMEOUT_MS,
@@ -43,4 +46,13 @@ function parseOptionalInt(value: string | undefined, fallback: number): number {
   if (value === undefined) return fallback;
   const parsed = Number.parseInt(value, 10);
   return Number.isNaN(parsed) ? fallback : parsed;
+}
+
+function parseCapabilities(value: string | undefined): string[] | undefined {
+  if (!value) return undefined;
+  const tags = value
+    .split(",")
+    .map((t) => t.trim().toLowerCase())
+    .filter(Boolean);
+  return tags.length > 0 ? tags : undefined;
 }

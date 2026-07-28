@@ -56,6 +56,7 @@ import {
   formatColleagueList,
   type ColleagueTemplate,
 } from "./colleagues.ts";
+import { CollabError, fromProtocolCode } from "./errors.ts";
 import { isWindows } from "./transport/paths.ts";
 
 // ─── Module-level state ──────────────────────────────────────────────────────
@@ -296,7 +297,8 @@ async function authenticateConnection(
   const token = record?.authToken;
   if (!token) {
     await conn.close();
-    throw new Error(`No auth token available for "${targetName}"`);
+    throw new CollabError("auth_failed",
+      `No auth token found for "${targetName}" in the registry. The peer may not be running.`);
   }
 
   await conn.send(createAuthEnvelope(peerId, targetPeerId, token));
@@ -305,19 +307,19 @@ async function authenticateConnection(
   const result = await reader.next();
   if (result.done || !result.value) {
     await conn.close();
-    throw new Error("Connection closed during auth");
+    throw new CollabError("protocol_error", "Connection closed during auth handshake");
   }
 
   const env = result.value;
   if (env.type !== "auth_result") {
     await conn.close();
-    throw new Error(`Expected auth_result, got ${env.type}`);
+    throw new CollabError("protocol_error", `Expected auth_result, got ${env.type}`);
   }
 
   const payload = env.payload as AuthResultPayload;
   if (!payload.ok) {
     await conn.close();
-    throw new Error(`Auth failed: ${payload.reason ?? "unknown"}`);
+    throw new CollabError("auth_failed", `Authentication rejected: ${payload.reason ?? "unknown"}`);
   }
 }
 
@@ -330,11 +332,13 @@ async function handleProbe(conn: PeerConnection, probeEnv: Envelope): Promise<vo
 
   // Get current peer state from the registry
   const self = getPeerById(peerId);
+  const caps = self?.capabilities ?? [];
   const peerMeta = {
     name: config.name,
     model: currentModel,
     status: self?.status ?? "idle",
     cwd: process.cwd(),
+    capabilities: caps,
   };
 
   // Match against probe filter (best-effort, transport-layer matching)
@@ -343,10 +347,10 @@ async function handleProbe(conn: PeerConnection, probeEnv: Envelope): Promise<vo
     matched = false;
   }
   if (probePayload.capability) {
-    // Simple keyword match against model name and cwd
-    const cap = probePayload.capability.toLowerCase();
-    const searchable = `${peerMeta.model} ${peerMeta.cwd} ${peerMeta.name}`.toLowerCase();
-    if (!searchable.includes(cap)) {
+    // Case-insensitive keyword match against aggregated capabilities
+    const needle = probePayload.capability.toLowerCase();
+    const haystack = caps.join(" ").toLowerCase();
+    if (!haystack.includes(needle)) {
       matched = false;
     }
   }
@@ -362,11 +366,12 @@ async function handleProbe(conn: PeerConnection, probeEnv: Envelope): Promise<vo
 
 // ─── Client: send a probe to a peer (OOB, no LLM) ───────────────────────────
 
-async function probePeer(targetName: string): Promise<{
+async function probePeer(targetName: string, capability?: string): Promise<{
   name: string;
   model: string;
   status: PeerStatus;
   cwd: string;
+  capabilities?: string[];
   matched: boolean;
 }> {
   const record = resolveName(targetName);
@@ -382,7 +387,7 @@ async function probePeer(targetName: string): Promise<{
   try {
     await authenticateConnection(conn, record.peerId, targetName);
 
-    const probe = createProbeEnvelope(peerId, record.peerId, {});
+    const probe = createProbeEnvelope(peerId, record.peerId, capability ? { capability } : {});
     await conn.send(probe);
 
     const reader = conn.receive[Symbol.asyncIterator]();
@@ -451,16 +456,18 @@ async function delegateToPeer(
   options: DelegateOptions,
   signal?: AbortSignal,
 ): Promise<DelegateResult> {
-  if (signal?.aborted) throw new Error("Delegate aborted before connecting");
+  if (signal?.aborted) throw new CollabError("cancelled", "Delegate aborted by user before connecting");
 
   const record = resolveName(targetName);
-  if (!record) {
+  if (!conn) {
     const available = listPeers().map((p) => p.name).join(", ") || "none";
-    throw new Error(`Colleague "${targetName}" not found. Available: ${available}`);
+    throw new CollabError("peer_not_found",
+      `Colleague "${targetName}" not found in registry. Available: ${available}`);
   }
 
   if (record.status === "unreachable") {
-    throw new Error(`Colleague "${targetName}" is unreachable (last seen: ${record.lastHeartbeatAt})`);
+    throw new CollabError("peer_unreachable",
+      `Colleague "${targetName}" has been unreachable for over 30s (last heartbeat: ${record.lastHeartbeatAt})`);
   }
 
   const protocolConvId = randomUUID();
@@ -514,7 +521,8 @@ async function delegateToPeer(
   );
 
   if (result.error) {
-    throw new Error(`Colleague "${targetName}" returned error: ${result.error.message} (${result.error.code})`);
+    const code = fromProtocolCode(result.error.code);
+    throw new CollabError(code, result.error.message);
   }
 
   return {
@@ -654,25 +662,34 @@ function registerTools(pi: ExtensionAPI): void {
     description:
       "Broadcast a message to all available colleagues and collect replies. " +
       "Uses out-of-band probes (zero context cost) to discover peer status first. " +
-      "Replies contain each peer's name, model, status, and working directory.",
-    promptSnippet: "Discover available colleague agents and their current status (zero context cost)",
+      "Replies contain each peer's name, model, status, working directory, and capabilities.\n\n" +
+      "Pass a `capability` to filter peers by keyword (e.g. 'security', 'typescript', " +
+      "'review'). Matching is case-insensitive against the peer's aggregated " +
+      "capability tags (PI_COLLAB_CAPABILITIES env + active tool names).",
+    promptSnippet: "Discover available colleague agents, their status, and capabilities (zero context cost)",
     promptGuidelines: [
       "Use broadcast_to_colleagues to check which colleagues are available before delegating work.",
       "broadcast_to_colleagues uses OOB probes — it never consumes LLM context tokens for discovery.",
+      "Pass a capability keyword to find colleagues with specific skills, e.g. { capability: 'security' }.",
     ],
     parameters: Type.Object({
       message: Type.String({ description: "Message to broadcast." }),
       filter: Type.Optional(Type.Array(Type.String(), {
         description: "Only send to these names. Omit = all.",
       })),
+      capability: Type.Optional(Type.String({
+        description: "Filter peers by capability keyword (e.g. 'security', 'review'). " +
+          "Case-insensitive match against peer's tool names and PI_COLLAB_CAPABILITIES tags.",
+      })),
       waitForReplies: Type.Optional(Type.Boolean({
         description: "Wait for replies? Default: true.",
       })),
     }),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
-      const { message, filter, waitForReplies } = params as {
+      const { message, filter, capability, waitForReplies } = params as {
         message: string;
         filter?: string[];
+        capability?: string;
         waitForReplies?: boolean;
       };
 
@@ -691,7 +708,7 @@ function registerTools(pi: ExtensionAPI): void {
       if (!shouldWait) {
         // Fire-and-forget announcement — still uses OOB probe to avoid LLM cost
         for (const p of targets) {
-          probePeer(p.name).catch((err) => {
+          probePeer(p.name, capability).catch((err) => {
             console.error(`[pi-collab] Broadcast probe to ${p.name} failed:`, err);
           });
         }
@@ -705,10 +722,12 @@ function registerTools(pi: ExtensionAPI): void {
 
       // Probe all peers OOB (no context cost) to discover their status
       const probeResults = await Promise.allSettled(
-        targets.map((p) => probePeer(p.name)),
+        targets.map((p) => probePeer(p.name, capability)),
       );
 
-      const parts: string[] = [`Probed ${targets.length} colleague(s):\n`];
+      const parts: string[] = [capability
+        ? `Probed ${targets.length} colleague(s) for capability "${capability}":\n`
+        : `Probed ${targets.length} colleague(s):\n`];
       for (let i = 0; i < targets.length; i++) {
         const r = probeResults[i];
         if (r.status === "fulfilled") {
@@ -956,7 +975,8 @@ async function delegateCommand(args: string, ctx: ExtensionCommandContext): Prom
       "info",
     );
   } catch (err: unknown) {
-    ctx.ui.notify(`Delegation failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+    const msg = err instanceof CollabError ? err.label : (err instanceof Error ? err.message : String(err));
+    ctx.ui.notify(`Delegation failed: ${msg}`, "error");
   }
 }
 
@@ -1201,6 +1221,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     // Generate a fresh auth token for this session
     authToken = generateAuthToken();
 
+    // Build aggregated capabilities: manual tags + active tool names
+    const toolNames = pi.getActiveTools();
+    const manualTags = config.capabilities ?? [];
+    const capabilities = [...new Set([...manualTags, ...toolNames])];
+
     const record: PeerRecord = {
       peerId,
       name: config.name,
@@ -1211,6 +1236,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       status: "idle",
       registeredAt: new Date().toISOString(),
       lastHeartbeatAt: new Date().toISOString(),
+      capabilities,
       authToken,
     };
 

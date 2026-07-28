@@ -23,6 +23,11 @@ export interface PeerRecord {
   model: string;
   /** Current status. */
   status: PeerStatus;
+  /**
+   * Aggregated capability tags: manual tags from PI_COLLAB_CAPABILITIES
+   * plus the peer's active tool names. Used for probe-based discovery.
+   */
+  capabilities?: string[];
   /** ISO 8601 timestamp of initial registration. */
   registeredAt: string;
   /** ISO 8601 timestamp of last heartbeat write. */
@@ -192,6 +197,7 @@ export interface ProbeResponsePayload {
     model: string;
     status: PeerStatus;
     cwd: string;
+    capabilities?: string[];
   };
 }
 
