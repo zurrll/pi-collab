@@ -459,7 +459,7 @@ async function delegateToPeer(
   if (signal?.aborted) throw new CollabError("cancelled", "Delegate aborted by user before connecting");
 
   const record = resolveName(targetName);
-  if (!conn) {
+  if (!record) {
     const available = listPeers().map((p) => p.name).join(", ") || "none";
     throw new CollabError("peer_not_found",
       `Colleague "${targetName}" not found in registry. Available: ${available}`);
