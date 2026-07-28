@@ -33,6 +33,7 @@ import {
   registerPeer,
   unregisterPeer,
   updatePeerStatus,
+  updatePeerModel,
   heartbeatPeer,
   listPeers,
   pruneStalePeers,
@@ -593,7 +594,8 @@ function registerTools(pi: ExtensionAPI): void {
         context.files = [];
         for (const fp of includeFiles) {
           try {
-            context.files.push({ path: fp, content: readFileSync(fp, "utf-8") });
+            const resolved = join(ctx.cwd, fp);
+            context.files.push({ path: resolved, content: readFileSync(resolved, "utf-8") });
           } catch { /* skip unreadable files */ }
         }
       }
@@ -732,8 +734,9 @@ function registerTools(pi: ExtensionAPI): void {
       for (let i = 0; i < targets.length; i++) {
         const r = probeResults[i];
         if (r.status === "fulfilled") {
-          const { name, model, status: s, cwd } = r.value;
-          parts.push(`- **${name}**  ${s}  ${model}  \`${cwd}\``);
+          const { name, model, status: s, cwd, capabilities: caps } = r.value;
+          const capStr = caps?.length ? `  [${caps.join(", ")}]` : "";
+          parts.push(`- **${name}**  ${s}  ${model}  \`${cwd}\`${capStr}`);
         } else {
           parts.push(`- **${targets[i].name}**  unreachable`);
         }
@@ -796,7 +799,10 @@ function registerTools(pi: ExtensionAPI): void {
       if (files?.length) {
         context.files = [];
         for (const fp of files) {
-          try { context.files.push({ path: fp, content: readFileSync(fp, "utf-8") }); } catch { /* skip */ }
+          try {
+            const resolved = join(ctx.cwd, fp);
+            context.files.push({ path: resolved, content: readFileSync(resolved, "utf-8") });
+          } catch { /* skip */ }
         }
       }
 
@@ -999,7 +1005,7 @@ function tokenCommand(ctx: ExtensionCommandContext): void {
 async function spawnPeerCommand(args: string, ctx: ExtensionCommandContext): Promise<void> {
   const nameMatch = args.match(/^(\S+)/);
   if (!nameMatch) {
-    ctx.ui.notify('Usage: /collab spawn <name> [--model provider/model] [--prompt "..."]', "warning");
+    ctx.ui.notify('Usage: /collab spawn <name> [--model provider/model] [--prompt "..."] [--tools tool1,tool2]', "warning");
     ctx.ui.notify('       /collab spawn <template> [--name peer-name]     (use a colleague template)', "info");
     return;
   }
@@ -1009,6 +1015,7 @@ async function spawnPeerCommand(args: string, ctx: ExtensionCommandContext): Pro
   const modelMatch = remaining.match(/--model\s+(\S+)/);
   const promptMatch = remaining.match(/--prompt\s+"([^"]+)"/);
   const nameOverrideMatch = remaining.match(/--name\s+(\S+)/);
+  const toolsMatch = remaining.match(/--tools\s+(\S+)/);
 
   // Resolve template if the name matches
   let template: ColleagueTemplate | undefined;
@@ -1034,6 +1041,7 @@ async function spawnPeerCommand(args: string, ctx: ExtensionCommandContext): Pro
 
   const extraArgs = ["--mode", "rpc", "--extension", extPath];
   if (model) extraArgs.push("--model", model);
+  if (toolsMatch?.[1]) extraArgs.push("--tools", toolsMatch[1]);
 
   const invocation = getPiInvocation(extraArgs);
   const childProcess = spawn(invocation.command, invocation.args, {
@@ -1157,14 +1165,15 @@ function statusPeerCommand(name: string, ctx: ExtensionCommandContext): void {
   }
 
   const lines = [
-    `Name:       ${peer.name}`,
-    `Peer ID:    ${peer.peerId}`,
-    `Status:     ${peer.status}`,
-    `Model:      ${peer.model}`,
-    `CWD:        ${peer.cwd}`,
-    `PID:        ${peer.pid}`,
-    `Registered: ${peer.registeredAt}`,
-    `Heartbeat:  ${peer.lastHeartbeatAt}`,
+    `Name:         ${peer.name}`,
+    `Peer ID:      ${peer.peerId}`,
+    `Status:       ${peer.status}`,
+    `Model:        ${peer.model}`,
+    `CWD:          ${peer.cwd}`,
+    `PID:          ${peer.pid}`,
+    `Capabilities: ${peer.capabilities?.join(", ") ?? "(not set)"}`,
+    `Registered:   ${peer.registeredAt}`,
+    `Heartbeat:    ${peer.lastHeartbeatAt}`,
   ];
   ctx.ui.notify(lines.join("\n"), "info");
 }
@@ -1187,6 +1196,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     if (config.systemPrompt) {
       return { systemPrompt: event.systemPrompt + "\n\n" + config.systemPrompt };
     }
+  });
+
+  // ── Keep PeerRecord in sync when model changes ──
+  pi.on("model_select", async (event) => {
+    currentModel = `${event.model.provider}/${event.model.id}`;
+    updatePeerModel(peerId, currentModel);
   });
 
   // ── Apply configured model (PI_COLLAB_MODEL) before peer registration ──

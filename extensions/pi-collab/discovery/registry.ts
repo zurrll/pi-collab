@@ -113,6 +113,14 @@ export function updatePeerStatus(peerId: string, status: PeerStatus): void {
   atomicWrite(getPeerPath(peerId), JSON.stringify(record, null, 2));
 }
 
+export function updatePeerModel(peerId: string, model: string): void {
+  const record = getPeerById(peerId);
+  if (!record) return;
+  record.model = model;
+  record.lastHeartbeatAt = new Date().toISOString();
+  atomicWrite(getPeerPath(peerId), JSON.stringify(record, null, 2));
+}
+
 export function heartbeatPeer(peerId: string): void {
   const record = getPeerById(peerId);
   if (!record) return;
