@@ -15,9 +15,13 @@
 import { randomUUID, randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { basename } from "node:path";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import type { PeerRecord, Envelope, ProbePayload, ProbeResponsePayload, PeerStatus, AuthPayload, AuthResultPayload } from "./types.ts";
 import { parseConfig, type CollabConfig } from "./config.ts";
@@ -46,6 +50,12 @@ import {
   createAuthResultEnvelope,
 } from "./protocol/envelope.ts";
 import * as agentCtx from "./agent-context.ts";
+import {
+  discoverColleagues,
+  resolveColleague,
+  formatColleagueList,
+  type ColleagueTemplate,
+} from "./colleagues.ts";
 import { isWindows } from "./transport/paths.ts";
 
 // ─── Module-level state ──────────────────────────────────────────────────────
@@ -58,10 +68,83 @@ let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 let currentModel = "unknown";
 let authToken = "";
 
+// ─── Widget keys ─────────────────────────────────────────────────────────────
+
+const WIDGET_KEY = "pi-collab-peers";
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function generateAuthToken(): string {
   return randomBytes(32).toString("hex"); // 256-bit, 64 hex chars
+}
+
+function formatTokens(count: number): string {
+  if (count < 1000) return count.toString();
+  if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
+  return `${Math.round(count / 1000)}k`;
+}
+
+function formatUsage(usage: { input?: number; output?: number; turns?: number; cost?: number } | undefined): string {
+  if (!usage) return "";
+  const parts: string[] = [];
+  if (usage.turns) parts.push(`${usage.turns} turn${usage.turns > 1 ? "s" : ""}`);
+  if (usage.input) parts.push(`↑${formatTokens(usage.input)}`);
+  if (usage.output) parts.push(`↓${formatTokens(usage.output)}`);
+  if (usage.cost) parts.push(`$${usage.cost.toFixed(4)}`);
+  return parts.join(" ");
+}
+
+// ─── Peer status widget ──────────────────────────────────────────────────────
+
+function statusIcon(status: PeerStatus): string {
+  switch (status) {
+    case "busy": return "◉";
+    case "unreachable": return "○";
+    default: return "●";
+  }
+}
+
+function buildPeerWidgetLines(ctx: ExtensionContext): string[] {
+  const peers = listPeers();
+  const self = peers.find((p) => p.peerId === peerId);
+  const others = peers.filter((p) => p.peerId !== peerId);
+
+  const lines: string[] = [];
+  const t = ctx.ui.theme;
+
+  lines.push(t.fg("dim", "── Peers ──"));
+
+  const colorForStatus = (status: PeerStatus) => {
+    if (status === "busy") return t.fg("accent", statusIcon(status));
+    if (status === "unreachable") return t.fg("dim", statusIcon(status));
+    return t.fg("success", statusIcon(status));
+  };
+
+  if (self) {
+    const icon = colorForStatus(self.status);
+    lines.push(`${icon} ${t.bold(self.name)} ${t.fg("dim", "(me)")}  ${t.fg("muted", self.model)}`);
+  }
+
+  for (const p of others) {
+    const icon = colorForStatus(p.status);
+    lines.push(`${icon} ${p.name}  ${t.fg("muted", p.model)}`);
+  }
+
+  if (peers.length === 0) {
+    lines.push(t.fg("dim", "  (no peers)"));
+  }
+
+  return lines;
+}
+
+function updatePeerWidget(ctx: ExtensionContext): void {
+  if (ctx.mode !== "tui") return;
+  const lines = buildPeerWidgetLines(ctx);
+  ctx.ui.setWidget(WIDGET_KEY, lines, { placement: "aboveEditor" });
+}
+
+function clearPeerWidget(ctx: ExtensionContext): void {
+  ctx.ui.setWidget(WIDGET_KEY, undefined);
 }
 
 // ─── Extension path resolution ───────────────────────────────────────────────
@@ -83,14 +166,33 @@ function resolveExtensionPath(): string {
 
 // ─── Resolve pi binary ───────────────────────────────────────────────────────
 
-function resolvePiBinary(): string {
-  // Check for a pi in PATH first
-  if (process.env.PI_BINARY && existsSync(process.env.PI_BINARY)) {
-    return process.env.PI_BINARY;
+/**
+ * Build the pi invocation command + args for spawning a peer process.
+ *
+ * Adapted from subagent's getPiInvocation(). When running via `node` + jiti
+ * (development), `process.execPath` is just `node` and we must pass the
+ * current script as the first argument. When pi is installed as a native
+ * binary (production), `process.execPath` is the pi binary itself and
+ * args can be passed directly.
+ */
+function getPiInvocation(extraArgs: string[]): { command: string; args: string[] } {
+  const currentScript = process.argv[1];
+
+  // Bun virtual script path — treat like native binary
+  const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
+  if (currentScript && !isBunVirtualScript && existsSync(currentScript)) {
+    return { command: process.execPath, args: [currentScript, ...extraArgs] };
   }
 
-  // Use the current node executable with the coding-agent entry
-  return process.execPath;
+  // If execPath looks like a native pi binary (not node/bun), use it directly
+  const execName = basename(process.execPath).toLowerCase();
+  const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName);
+  if (!isGenericRuntime) {
+    return { command: process.execPath, args: extraArgs };
+  }
+
+  // Fallback: try the `pi` command on PATH
+  return { command: "pi", args: extraArgs };
 }
 
 // ─── Server: inbound connection accept loop ──────────────────────────────────
@@ -347,7 +449,10 @@ async function delegateToPeer(
   operation: string,
   task: string,
   options: DelegateOptions,
+  signal?: AbortSignal,
 ): Promise<DelegateResult> {
+  if (signal?.aborted) throw new Error("Delegate aborted before connecting");
+
   const record = resolveName(targetName);
   if (!record) {
     const available = listPeers().map((p) => p.name).join(", ") || "none";
@@ -405,7 +510,7 @@ async function delegateToPeer(
         ].join(" ");
       },
     },
-    AbortSignal.timeout?.(config.conversationTimeoutMs),
+    signal ?? AbortSignal.timeout?.(config.conversationTimeoutMs),
   );
 
   if (result.error) {
@@ -438,6 +543,12 @@ function registerTools(pi: ExtensionAPI): void {
       "in the next round. Continue calling with the same `conversation_id` " +
       "until the discussion is resolved.\n\n" +
       "Do NOT use for quick facts — only for substantial subtasks.",
+    promptSnippet: "Delegate a substantial subtask to a named colleague agent and wait for the result",
+    promptGuidelines: [
+      "Use delegate_to_colleague for substantial subtasks that benefit from an independent context window.",
+      "Do NOT use delegate_to_colleague for quick lookups — use grep/read/bash yourself instead.",
+      "For multi-round discussions, reuse the same conversationId across calls so the colleague sees prior context.",
+    ],
     parameters: Type.Object({
       colleague: Type.String({
         description: "Name of the colleague, e.g. 'reviewer', 'architect'.",
@@ -478,12 +589,60 @@ function registerTools(pi: ExtensionAPI): void {
         }
       }
 
-      const result = await delegateToPeer(colleague, "delegate", task, { maxTurns, context, conversationId });
+      const result = await delegateToPeer(colleague, "delegate", task, { maxTurns, context, conversationId }, signal);
 
       return {
         content: [{ type: "text", text: result.text }],
         details: { colleague, usage: result.usage, toolCalls: result.toolCalls },
       };
+    },
+
+    renderCall(args, theme, _context) {
+      const colleague = args.colleague as string ?? "...";
+      const task = (args.task as string) ?? "...";
+      const preview = task.length > 80 ? `${task.slice(0, 80)}...` : task;
+      let text = theme.fg("toolTitle", theme.bold("delegate_to_colleague "));
+      text += theme.fg("accent", `→ ${colleague}`);
+      if (args.conversationId) {
+        text += theme.fg("dim", ` [${args.conversationId}]`);
+      }
+      text += `\n  ${theme.fg("dim", preview)}`;
+      return new Text(text, 0, 0);
+    },
+
+    renderResult(result, { expanded }, theme, _context) {
+      const details = result.details as { colleague?: string; usage?: { input: number; output: number; turns: number; cost: number }; toolCalls?: Array<{ tool: string }> } | undefined;
+      const icon = result.isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
+      const name = details?.colleague ?? "colleague";
+      const usageStr = formatUsage(details?.usage);
+      const toolCount = details?.toolCalls?.length ?? 0;
+
+      let header = `${icon} ${theme.fg("toolTitle", theme.bold(name))}`;
+      if (usageStr) header += theme.fg("dim", `  ${usageStr}`);
+      if (toolCount) header += theme.fg("dim", `  ${toolCount} tools`);
+
+      if (!expanded) {
+        const text = result.content[0];
+        const preview = text?.type === "text" ? text.text.slice(0, 120) : "";
+        if (preview) {
+          return new Text(`${header}\n${theme.fg("toolOutput", preview)}`, 0, 0);
+        }
+        return new Text(header, 0, 0);
+      }
+
+      const container = new Container();
+      container.addChild(new Text(header, 0, 0));
+      const text = result.content[0];
+      if (text?.type === "text") {
+        container.addChild(new Spacer(1));
+        container.addChild(new Text(text.text, 0, 0));
+      }
+      if (details?.toolCalls?.length) {
+        container.addChild(new Spacer(1));
+        const tools = details.toolCalls.map((tc) => tc.tool).join(", ");
+        container.addChild(new Text(theme.fg("dim", `Tools used: ${tools}`), 0, 0));
+      }
+      return container;
     },
   });
 
@@ -496,6 +655,11 @@ function registerTools(pi: ExtensionAPI): void {
       "Broadcast a message to all available colleagues and collect replies. " +
       "Uses out-of-band probes (zero context cost) to discover peer status first. " +
       "Replies contain each peer's name, model, status, and working directory.",
+    promptSnippet: "Discover available colleague agents and their current status (zero context cost)",
+    promptGuidelines: [
+      "Use broadcast_to_colleagues to check which colleagues are available before delegating work.",
+      "broadcast_to_colleagues uses OOB probes — it never consumes LLM context tokens for discovery.",
+    ],
     parameters: Type.Object({
       message: Type.String({ description: "Message to broadcast." }),
       filter: Type.Optional(Type.Array(Type.String(), {
@@ -558,6 +722,24 @@ function registerTools(pi: ExtensionAPI): void {
 
       return { content: [{ type: "text", text: parts.join("\n") }] };
     },
+
+    renderCall(args, theme, _context) {
+      const count = (args.filter as string[])?.length ?? "all";
+      let text = theme.fg("toolTitle", theme.bold("broadcast_to_colleagues "));
+      text += theme.fg("accent", `→ ${count} peer(s)`);
+      return new Text(text, 0, 0);
+    },
+
+    renderResult(result, _options, theme, _context) {
+      const text = result.content[0];
+      const content = text?.type === "text" ? text.text : "";
+      const lines = content.split("\n");
+      let out = theme.fg("success", "✓") + " " + theme.fg("toolTitle", theme.bold("broadcast"));
+      for (const line of lines.slice(1, 8)) {
+        if (line.trim()) out += `\n  ${theme.fg("dim", line.trim())}`;
+      }
+      return new Text(out, 0, 0);
+    },
   });
 
   // ── review_by_colleague ──
@@ -567,6 +749,11 @@ function registerTools(pi: ExtensionAPI): void {
     label: "Review by Colleague",
     description:
       "Ask a colleague to review code or a design and return structured feedback.",
+    promptSnippet: "Ask a colleague to review code or design with structured, severity-rated feedback",
+    promptGuidelines: [
+      "Use review_by_colleague before committing or merging significant changes.",
+      "Specify focusAreas to narrow the review scope — e.g. ['security', 'performance', 'correctness'].",
+    ],
     parameters: Type.Object({
       colleague: Type.String({ description: "Name of the reviewing colleague." }),
       subject: Type.String({ description: "What to review — describe or paste content." }),
@@ -606,12 +793,50 @@ function registerTools(pi: ExtensionAPI): void {
         subject,
       ].filter(Boolean).join("\n");
 
-      const result = await delegateToPeer(colleague, "review", reviewPrompt, { focusAreas, context });
+      const result = await delegateToPeer(colleague, "review", reviewPrompt, { focusAreas, context }, signal);
 
       return {
         content: [{ type: "text", text: result.text }],
         details: { colleague, reviewOf: subject.slice(0, 100) },
       };
+    },
+
+    renderCall(args, theme, _context) {
+      const colleague = args.colleague as string ?? "...";
+      const areas = (args.focusAreas as string[])?.join(", ") ?? "general";
+      let text = theme.fg("toolTitle", theme.bold("review_by_colleague "));
+      text += theme.fg("accent", `→ ${colleague}`);
+      text += theme.fg("dim", `  [${areas}]`);
+      return new Text(text, 0, 0);
+    },
+
+    renderResult(result, { expanded }, theme, _context) {
+      const details = result.details as { colleague?: string; reviewOf?: string } | undefined;
+      const icon = result.isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
+      const name = details?.colleague ?? "reviewer";
+
+      let header = `${icon} ${theme.fg("toolTitle", theme.bold(name))}`;
+      if (details?.reviewOf) {
+        header += theme.fg("dim", `  re: ${details.reviewOf}`);
+      }
+
+      if (!expanded) {
+        const text = result.content[0];
+        const preview = text?.type === "text" ? text.text.split("\n").slice(0, 3).join("\n") : "";
+        if (preview) {
+          return new Text(`${header}\n${theme.fg("toolOutput", preview)}`, 0, 0);
+        }
+        return new Text(header, 0, 0);
+      }
+
+      const container = new Container();
+      container.addChild(new Text(header, 0, 0));
+      const text = result.content[0];
+      if (text?.type === "text") {
+        container.addChild(new Spacer(1));
+        container.addChild(new Text(text.text, 0, 0));
+      }
+      return container;
     },
   });
 
@@ -623,6 +848,11 @@ function registerTools(pi: ExtensionAPI): void {
     description:
       "Ask a clarifying question to the colleague who delegated this task. " +
       "Only available when processing a delegated request from another agent.",
+    promptSnippet: "Ask a clarifying question back to the delegating colleague (only during delegation)",
+    promptGuidelines: [
+      "Use ask_colleague only when you are actively processing an inbound delegated task.",
+      "Ask specific, targeted questions — the calling agent will provide answers.",
+    ],
     parameters: Type.Object({
       question: Type.String({
         description: "Your question. Be specific.",
@@ -650,6 +880,37 @@ function registerTools(pi: ExtensionAPI): void {
 function registerCommands(pi: ExtensionAPI): void {
   pi.registerCommand("collab", {
     description: "Manage collaboration peers",
+    getArgumentCompletions: (prefix: string) => {
+      const subcommands = ["spawn", "list", "stop", "rename", "status", "delegate", "token", "templates"];
+      const parts = prefix.trim().split(/\s+/);
+
+      if (parts.length <= 1) {
+        const matching = subcommands.filter((s) => s.startsWith(parts[0] ?? ""));
+        if (matching.length > 0) return matching.map((s) => ({ value: s, label: s }));
+      }
+
+      // For spawn, suggest template names as second argument
+      if (parts[0] === "spawn" && parts.length === 2) {
+        const { templates } = discoverColleagues(process.cwd());
+        const namePrefix = parts[1] ?? "";
+        const matching = templates
+          .filter((t) => t.name.startsWith(namePrefix))
+          .map((t) => ({ value: t.name, label: `${t.name} — ${t.description}` }));
+        if (matching.length > 0) return matching;
+      }
+
+      // For stop/status/delegate, suggest peer names as second argument
+      if ((parts[0] === "stop" || parts[0] === "status" || parts[0] === "delegate") && parts.length === 2) {
+        const peers = listPeers().filter((p) => p.peerId !== peerId);
+        const namePrefix = parts[1] ?? "";
+        const matching = peers
+          .map((p) => p.name)
+          .filter((n) => n.startsWith(namePrefix));
+        if (matching.length > 0) return matching.map((n) => ({ value: n, label: n }));
+      }
+
+      return null;
+    },
     handler: async (args, ctx) => {
       const parts = args.trim().split(/\s+/);
       const sub = parts[0];
@@ -663,9 +924,10 @@ function registerCommands(pi: ExtensionAPI): void {
         case "status": return statusPeerCommand(rest, ctx);
         case "delegate": return delegateCommand(rest, ctx);
         case "token": return tokenCommand(ctx);
+        case "templates": return templatesCommand(ctx);
         default:
           ctx.ui.notify(
-            "Usage: /collab spawn|list|stop|rename|status|delegate|token",
+            "Usage: /collab spawn|list|stop|rename|status|delegate|token|templates",
             "warning",
           );
       }
@@ -717,14 +979,25 @@ async function spawnPeerCommand(args: string, ctx: ExtensionCommandContext): Pro
   const nameMatch = args.match(/^(\S+)/);
   if (!nameMatch) {
     ctx.ui.notify('Usage: /collab spawn <name> [--model provider/model] [--prompt "..."]', "warning");
+    ctx.ui.notify('       /collab spawn <template> [--name peer-name]     (use a colleague template)', "info");
     return;
   }
 
-  const name = nameMatch[1];
-  const modelMatch = args.match(/--model\s+(\S+)/);
-  const promptMatch = args.match(/--prompt\s+"([^"]+)"/);
+  const nameOrTemplate = nameMatch[1];
+  const remaining = args.slice(nameOrTemplate.length).trim();
+  const modelMatch = remaining.match(/--model\s+(\S+)/);
+  const promptMatch = remaining.match(/--prompt\s+"([^"]+)"/);
+  const nameOverrideMatch = remaining.match(/--name\s+(\S+)/);
 
-  ctx.ui.notify(`Spawning colleague "${name}"...`, "info");
+  // Resolve template if the name matches
+  let template: ColleagueTemplate | undefined;
+  try { template = resolveColleague(nameOrTemplate, process.cwd()); } catch { /* ignore */ }
+
+  const peerName = nameOverrideMatch?.[1] ?? (template ? template.name : nameOrTemplate);
+  const model = modelMatch?.[1] ?? template?.model;
+  const systemPrompt = promptMatch?.[1] ?? template?.systemPrompt;
+
+  ctx.ui.notify(`Spawning colleague "${peerName}"...`, "info");
 
   const extPath = resolveExtensionPath();
   if (!extPath) {
@@ -733,12 +1006,16 @@ async function spawnPeerCommand(args: string, ctx: ExtensionCommandContext): Pro
 
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
-    PI_COLLAB_NAME: name,
+    PI_COLLAB_NAME: peerName,
   };
-  if (promptMatch?.[1]) env.PI_COLLAB_SYSTEM_PROMPT = promptMatch[1];
-  if (modelMatch?.[1]) env.PI_COLLAB_MODEL = modelMatch[1];
+  if (systemPrompt) env.PI_COLLAB_SYSTEM_PROMPT = systemPrompt;
+  if (model) env.PI_COLLAB_MODEL = model;
 
-  const childProcess = spawn(resolvePiBinary(), ["--mode", "rpc", "--extension", extPath], {
+  const extraArgs = ["--mode", "rpc", "--extension", extPath];
+  if (model) extraArgs.push("--model", model);
+
+  const invocation = getPiInvocation(extraArgs);
+  const childProcess = spawn(invocation.command, invocation.args, {
     cwd: process.cwd(),
     env,
     stdio: ["pipe", "pipe", "pipe"],
@@ -746,23 +1023,47 @@ async function spawnPeerCommand(args: string, ctx: ExtensionCommandContext): Pro
   });
 
   childProcess.on("error", (err) => {
-    ctx.ui.notify(`Failed to spawn "${name}": ${err.message}`, "error");
+    ctx.ui.notify(`Failed to spawn "${peerName}": ${err.message}`, "error");
   });
 
-  // Give the peer time to start and register
-  await new Promise((r) => setTimeout(r, 2000));
+  // Poll for peer registration (up to 10 s, checking every 200 ms)
+  const deadline = Date.now() + 10_000;
+  let peer = resolveName(peerName);
+  while (!peer && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 200));
+    peer = resolveName(peerName);
+  }
 
-  const peer = resolveName(name);
   if (peer) {
-    ctx.ui.notify(`Colleague "${name}" is online (${peer.peerId.slice(0, 8)}...)`, "info");
+    ctx.ui.notify(`Colleague "${peerName}" is online (${peer.peerId.slice(0, 8)}...)`, "info");
   } else {
-    ctx.ui.notify(`Colleague "${name}" spawned but not yet registered. Check stderr for errors.`, "warning");
+    ctx.ui.notify(`Colleague "${peerName}" spawned but not yet registered after 10s. Check stderr for errors.`, "warning");
   }
 
   // Detach so the child outlives this session if needed.
   // On Windows, spawned processes ignore POSIX signals;
   // /collab stop cleans up the registry instead of killing.
   childProcess.unref();
+}
+
+function templatesCommand(ctx: ExtensionCommandContext): void {
+  const { templates, projectColleaguesDir } = discoverColleagues(ctx.cwd);
+  if (templates.length === 0) {
+    const globalDir = `${getAgentDir()}/colleagues`;
+    ctx.ui.notify(
+      `No colleague templates found.\n\nCreate .md files in:\n  ${globalDir}\n  .pi/colleagues/\n\nSee README for format.`,
+      "info",
+    );
+    return;
+  }
+
+  const lines: string[] = [`${templates.length} template(s) available:`];
+  if (projectColleaguesDir) {
+    lines.push(`Project: ${projectColleaguesDir}`);
+  }
+  lines.push(formatColleagueList(templates));
+  lines.push("\nUse /collab spawn <template> to start a peer from a template.");
+  ctx.ui.notify(lines.join("\n"), "info");
 }
 
 function listPeersCommand(ctx: ExtensionCommandContext): void {
@@ -860,15 +1161,42 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   registerTools(pi);
   registerCommands(pi);
 
-  // ── session_start: register peer, bind socket, start heartbeat ──
+  // ── Inject peer system prompt (PI_COLLAB_SYSTEM_PROMPT) ──
+  pi.on("before_agent_start", async (event) => {
+    if (config.systemPrompt) {
+      return { systemPrompt: event.systemPrompt + "\n\n" + config.systemPrompt };
+    }
+  });
+
+  // ── Apply configured model (PI_COLLAB_MODEL) before peer registration ──
   pi.on("session_start", async (_event, ctx) => {
-    try {
-      const models = ctx.modelRegistry.getAvailable();
-      if (models.length) {
-        const active = models.find((m) => m.id === ctx.model?.id);
-        currentModel = active ? `${active.provider}/${active.id}` : "unknown";
+    if (config.model) {
+      const [provider, ...modelParts] = config.model.split("/");
+      const modelId = modelParts.join("/");
+      if (provider && modelId) {
+        const model = ctx.modelRegistry.find(provider, modelId);
+        if (model) {
+          const ok = await pi.setModel(model);
+          if (ok) {
+            currentModel = `${provider}/${modelId}`;
+          }
+        }
       }
-    } catch { /* non-critical */ }
+    }
+  });
+
+  // ── session_start: resolve model, register peer, bind socket, heartbeat ──
+  pi.on("session_start", async (_event, ctx) => {
+    // If no model was configured via PI_COLLAB_MODEL, detect the active model
+    if (currentModel === "unknown") {
+      try {
+        const models = ctx.modelRegistry.getAvailable();
+        if (models.length) {
+          const active = models.find((m) => m.id === ctx.model?.id);
+          currentModel = active ? `${active.provider}/${active.id}` : "unknown";
+        }
+      } catch { /* non-critical */ }
+    }
 
     // Generate a fresh auth token for this session
     authToken = generateAuthToken();
@@ -907,18 +1235,29 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
     ctx.ui.setTitle(`pi [${config.name}]`);
     ctx.ui.notify(`pi-collab: Registered as "${config.name}"`, "info");
+    updatePeerWidget(ctx);
   });
 
-  // ── Turn boundaries: update peer status ──
-  pi.on("turn_start", () => updatePeerStatus(peerId, "busy"));
-  pi.on("turn_end", () => updatePeerStatus(peerId, "idle"));
-  pi.on("agent_settled", () => updatePeerStatus(peerId, "idle"));
+  // ── Turn boundaries: update peer status and widget ──
+  pi.on("turn_start", async (_event, ctx) => {
+    updatePeerStatus(peerId, "busy");
+    updatePeerWidget(ctx);
+  });
+  pi.on("turn_end", async (_event, ctx) => {
+    updatePeerStatus(peerId, "idle");
+    updatePeerWidget(ctx);
+  });
+  pi.on("agent_settled", async (_event, ctx) => {
+    updatePeerStatus(peerId, "idle");
+    updatePeerWidget(ctx);
+  });
 
   // ── Shutdown: clean up ──
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (_event, ctx) => {
     if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = undefined; }
     if (listener) { await listener.close(); listener = undefined; }
     authToken = "";
+    clearPeerWidget(ctx);
     unregisterPeer(peerId, config.name);
   });
 }

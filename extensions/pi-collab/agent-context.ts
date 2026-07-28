@@ -32,6 +32,13 @@ interface PendingTask {
   askQuestion?: (question: string) => Promise<string>;
   /** Snapshot of branch entries before task injection, for response extraction. */
   branchLengthBefore: number;
+  /**
+   * Count of in-flight askQuestion calls. agent_settled must not resolve
+   * pendingTask while a question/answer roundtrip is active — the agent
+   * may settle briefly between the tool-call turn and the next LLM
+   * turn when the answer arrives.
+   */
+  activeAskCount: number;
 }
 
 let pendingTask: PendingTask | undefined;
@@ -47,6 +54,10 @@ export function setup(extensionApi: ExtensionAPI): void {
 
   pi.on("agent_settled", (_event, ctx) => {
     if (!pendingTask) return;
+    // Do NOT resolve while an askQuestion roundtrip is in flight.
+    // The agent may settle briefly after the ask_colleague tool call
+    // completes but before the LLM processes the answer and continues.
+    if (pendingTask.activeAskCount > 0) return;
 
     const { resolve, branchLengthBefore } = pendingTask;
     pendingTask = undefined;
@@ -90,6 +101,19 @@ export function injectTask(
       reject(new Error("Task timed out waiting for agent response"));
     }, timeoutMs);
 
+    // Wrap askQuestion to track the active call count.
+    // agent_settled skips resolution while a question is in flight.
+    const trackedAskQuestion = askQuestion
+      ? async (question: string): Promise<string> => {
+          pendingTask!.activeAskCount++;
+          try {
+            return await askQuestion(question);
+          } finally {
+            pendingTask!.activeAskCount--;
+          }
+        }
+      : undefined;
+
     pendingTask = {
       resolve: (text: string) => {
         clearTimeout(timer);
@@ -99,8 +123,9 @@ export function injectTask(
         clearTimeout(timer);
         reject(err);
       },
-      askQuestion,
+      askQuestion: trackedAskQuestion,
       branchLengthBefore: branchLength,
+      activeAskCount: 0,
     };
 
     pi!.sendUserMessage(taskPrompt);
