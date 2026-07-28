@@ -10,7 +10,7 @@ same host to communicate and collaborate on shared tasks.
 pi install npm:pi-collab
 
 # From GitHub
-pi install git:github.com/zurrll/pi-collab@v0.1.0
+pi install git:github.com/zurrll/pi-collab@v0.2.0
 ```
 
 Or for development, load directly without installing:
