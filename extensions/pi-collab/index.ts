@@ -70,6 +70,7 @@ let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 let widgetCtx: ExtensionContext | undefined;
 let currentModel = "unknown";
 let authToken = "";
+let piApi: ExtensionAPI | undefined;
 
 // ─── Widget keys ─────────────────────────────────────────────────────────────
 
@@ -907,7 +908,7 @@ function registerCommands(pi: ExtensionAPI): void {
   pi.registerCommand("collab", {
     description: "Manage collaboration peers",
     getArgumentCompletions: (prefix: string) => {
-      const subcommands = ["spawn", "list", "stop", "rename", "status", "delegate", "token", "templates"];
+      const subcommands = ["spawn", "list", "stop", "start", "rename", "status", "delegate", "token", "templates"];
       const parts = prefix.trim().split(/\s+/);
 
       if (parts.length <= 1) {
@@ -946,6 +947,7 @@ function registerCommands(pi: ExtensionAPI): void {
         case "spawn": return spawnPeerCommand(rest, ctx);
         case "list": return listPeersCommand(ctx);
         case "stop": return stopPeerCommand(rest, ctx);
+        case "start": return startPeerCommand(ctx);
         case "rename": return renamePeerCommand(rest, ctx);
         case "status": return statusPeerCommand(rest, ctx);
         case "delegate": return delegateCommand(rest, ctx);
@@ -953,7 +955,7 @@ function registerCommands(pi: ExtensionAPI): void {
         case "templates": return templatesCommand(ctx);
         default:
           ctx.ui.notify(
-            "Usage: /collab spawn|list|stop|rename|status|delegate|token|templates",
+            "Usage: /collab spawn|list|stop|start|rename|status|delegate|token|templates",
             "warning",
           );
       }
@@ -1125,9 +1127,81 @@ function stopPeerCommand(name: string, ctx: ExtensionCommandContext): void {
     return;
   }
 
-  // Best-effort cleanup: remove registry entry and socket
+  const isSelf = peer.peerId === peerId;
   unregisterPeer(peer.peerId, peer.name);
-  ctx.ui.notify(`Colleague "${name}" removed from registry.`, "info");
+
+  if (isSelf) {
+    // Stop accepting connections and heartbeat while offline
+    if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = undefined; }
+    if (listener) { listener.close().catch(() => {}); listener = undefined; }
+    authToken = "";
+    updatePeerWidget(ctx);
+    ctx.ui.notify(`Peer "${peer.name}" is now offline. Use /collab start to re-enable.`, "info");
+  } else {
+    ctx.ui.notify(`Colleague "${name}" removed from registry.`, "info");
+  }
+}
+
+// ── /collab start — re-enable after /collab stop ──────────────────────────
+
+async function startPeerCommand(ctx: ExtensionCommandContext): Promise<void> {
+  const existing = getPeerById(peerId);
+  if (existing) {
+    ctx.ui.notify("Peer is already registered.", "info");
+    return;
+  }
+
+  ctx.ui.notify("Re-registering peer...", "info");
+
+  authToken = generateAuthToken();
+
+  const toolNames = piApi!.getActiveTools();
+  const manualTags = config.capabilities ?? [];
+  const capabilities = [...new Set([...manualTags, ...toolNames])];
+
+  const record: PeerRecord = {
+    peerId,
+    name: config.name,
+    socketPath: getSocketPath(peerId),
+    pid: process.pid,
+    cwd: process.cwd(),
+    model: currentModel,
+    status: "idle",
+    registeredAt: new Date().toISOString(),
+    lastHeartbeatAt: new Date().toISOString(),
+    capabilities,
+    authToken,
+  };
+
+  try {
+    registerPeer(record);
+  } catch (err: unknown) {
+    ctx.ui.notify(`Failed to register: ${String(err)}`, "error");
+    return;
+  }
+
+  // Re-bind socket if it was closed
+  if (!listener) {
+    try {
+      await startServer();
+    } catch (err) {
+      console.error("[pi-collab] Server restart failed:", err);
+      ctx.ui.notify("Failed to bind socket", "error");
+      unregisterPeer(peerId, config.name);
+      return;
+    }
+  }
+
+  // Restart heartbeat if stopped
+  if (!heartbeatTimer) {
+    heartbeatTimer = setInterval(() => {
+      heartbeatPeer(peerId);
+      if (widgetCtx) updatePeerWidget(widgetCtx);
+    }, config.heartbeatIntervalMs);
+  }
+
+  updatePeerWidget(ctx);
+  ctx.ui.notify(`Peer "${config.name}" is back online.`, "info");
 }
 
 function renamePeerCommand(newName: string, ctx: ExtensionCommandContext): void {
@@ -1181,6 +1255,7 @@ function statusPeerCommand(name: string, ctx: ExtensionCommandContext): void {
 // ─── Extension Entry Point ───────────────────────────────────────────────────
 
 export default async function (pi: ExtensionAPI): Promise<void> {
+  piApi = pi;
   config = parseConfig();
   peerId = randomUUID();
   transport = new UnixSocketTransport();
