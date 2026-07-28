@@ -50,20 +50,19 @@ Ask the reviewer to review the file package.json. Focus on correctness.
 | Tool | Description |
 |------|-------------|
 | `delegate_to_colleague` | Send a task to a named colleague and wait for the result. Supports multi-round discussion via optional `conversationId` parameter. |
-| `broadcast_to_colleagues` | Discover peer status (OOB probe, zero context cost) |
-| `review_by_colleague` | Ask a colleague to review code with structured feedback |
-| `ask_colleague` | (For use by colleagues) Ask a clarifying question back to the delegating peer |
+| `broadcast_to_colleagues` | Discover peer status and capabilities (OOB probe, zero context cost). Filter by `capability` keyword. |
+| `review_by_colleague` | Ask a colleague to review code with structured, severity-rated feedback. |
+| `ask_colleague` | (For use by colleagues) Ask a clarifying question back to the delegating peer. |
 
 Each tool includes `promptSnippet` and `promptGuidelines` so the LLM receives
 clear guidance on when and how to use them. Tools also have custom TUI rendering
-(`renderCall` / `renderResult`) showing colleague name, task preview, token
-usage, and expandable details.
+showing colleague name, task preview, token usage, and expandable details.
 
 ### Multi-Round Discussions
 
 Pass a `conversationId` (any short string, e.g. `"auth-refactor"`) to `delegate_to_colleague`.
-The colleague's session persists across calls — they see full history. Continue calling with
-the same ID until the discussion is resolved.
+The colleague's session persists across calls — they see full history including
+who sent each message. Continue calling with the same ID until resolved.
 
 ```
 Round 1: delegate_to_colleague { colleague: "reviewer", task: "...", conversationId: "auth-refactor" }
@@ -72,21 +71,47 @@ Round 2: delegate_to_colleague { colleague: "reviewer", task: "...", conversatio
 
 ### Message Annotation
 
-Tasks injected to a colleague's agent loop include a strong ASCII box header marking them as
-"INCOMING TASK FROM COLLEAGUE AGENT" with explicit rules: no greetings, no sign-offs,
-response goes to the colleague, not the user. Prevents LLM from confusing colleague messages
-with user prompts.
+Tasks injected to a colleague's agent loop include a strong ASCII box header:
+
+```
+┌─────────────────────────────────────────────┐
+│  INCOMING TASK FROM reviewer               │
+│  → This is NOT from your user              │
+│  → Your response goes to the colleague     │
+│  → Be concise and technical                │
+│  → No greetings, no sign-offs              │
+│  → Use ask_colleague tool if you need info │
+└─────────────────────────────────────────────┘
+```
+
+The header includes the **caller's name** (resolved from the peer registry) so the
+LLM can identify and tailor responses to specific colleagues.  The six rules
+prevent the LLM from confusing colleague messages with user prompts.
+
+### Error Handling
+
+All errors use structured error codes with **LLM-actionable hints**:
+
+| Code | Hint |
+|------|------|
+| `peer_not_found` | Try `/collab list` to see active peers, or `/collab spawn` to start one. |
+| `peer_unreachable` | Peer may have crashed. Try `/collab stop` to clean up, then respawn. |
+| `peer_busy` | Wait and retry, or delegate to a different colleague. |
+| `auth_failed` | Peer has restarted (new token). Use `/collab token` to get the new token. |
+| `timeout` | Task too complex or model too slow. Split into smaller pieces. |
+| `cancelled` | User pressed Escape. Retry when ready. |
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `/collab spawn <name\|template>` | Start a headless peer. If `<name>` matches a colleague template, loads model/prompt from it. Accepts `--model`, `--prompt`, `--name` flags. |
+| `/collab spawn <name\|template>` | Start a headless peer. Supports templates, `--model`, `--prompt`, `--name`, `--tools` flags. |
 | `/collab list` | List all registered peers with status, model, and heartbeat |
-| `/collab stop <name>` | Remove a peer from the registry |
+| `/collab status [name]` | Show detailed status including capabilities (without auth token) |
+| `/collab stop <name>` | Remove a peer from the registry. On self: full offline (stops listener + heartbeat). |
+| `/collab start` | Re-enable the current peer after `/collab stop` (re-registers, rebinds socket, restarts heartbeat) |
 | `/collab rename <name>` | Rename the current peer |
-| `/collab status [name]` | Show detailed status for a peer (without auth token) |
-| `/collab delegate <name> <task>` | Manually delegate a task to a colleague |
+| `/collab delegate <name> <task>` | Manually delegate a task to a colleague (bypasses LLM middleman) |
 | `/collab templates` | List available colleague templates |
 | `/collab token` | Show this peer's auth token (share with trusted peers) |
 
@@ -120,15 +145,39 @@ Project templates override global templates with the same name.
 
 **Usage:**
 ```
-/collab spawn reviewer                      # Uses template's model + system prompt
-/collab spawn reviewer --name code-checker  # Override the display name
-/collab spawn reviewer --model openai/gpt-5 # Override the model
-/collab templates                           # List all available templates
+/collab spawn reviewer                        # Uses template's model + system prompt
+/collab spawn reviewer --name code-checker    # Override the display name
+/collab spawn reviewer --model openai/gpt-5   # Override the model
+/collab spawn reviewer --tools read,bash      # Restrict tool set
+/collab templates                             # List all available templates
+```
+
+## Capability Broadcasting
+
+Peers automatically publish their capabilities — a union of their active tool
+names and optional manual tags from the `PI_COLLAB_CAPABILITIES` environment
+variable.  This enables skill-based peer discovery.
+
+```bash
+# Mark a peer with manual capability tags
+PI_COLLAB_CAPABILITIES="code-review,typescript,security" pi -e pi-collab
+```
+
+**Filtering by capability:**
+
+```
+broadcast_to_colleagues { capability: "security" }
+→ returns only peers whose capabilities (tools + tags) match "security"
+```
+
+Capabilities are shown in `/collab status` and in broadcast results:
+```
+- **reviewer**  idle  claude-sonnet-4  `/project`  [read, bash, edit, grep, code-review, security]
 ```
 
 ## Peer Status Widget
 
-A TUI widget above the editor displays the current mesh state, updated in real-time:
+A TUI widget above the editor displays the current mesh state:
 
 ```
 ── Peers ──
@@ -138,6 +187,9 @@ A TUI widget above the editor displays the current mesh state, updated in real-t
 ```
 
 Status icons: `● idle` (green), `◉ busy` (yellow), `○ unreachable` (dim).
+
+The widget updates on turn boundaries **and** on the heartbeat interval (every 5 s),
+so newly spawned peers appear automatically without needing `/collab list`.
 
 ## Authentication
 
@@ -170,7 +222,7 @@ Agent Bridge (injectTask, agent_settled capture, activeAskCount guard)
     ↓
 Tools (delegate, broadcast, review, ask_colleague) + Colleague Templates
     ↓
-TUI (peer status widget, custom tool rendering)
+TUI (peer status widget, custom tool rendering, capability display)
 ```
 
 Probe messages are handled out-of-band at the transport layer — they never
@@ -182,7 +234,7 @@ reach the LLM context window, making peer discovery free.
 - `delegate_to_colleague` is blocking; colleague's questions are answered via natural
   language in the response (next round), not synchronously
 - Message source annotation is text-level, not protocol-level (mitigated by strong
-  ASCII box markers)
+  ASCII box markers and caller name display)
 - No tool-set syncing between peers
 - Single inbound request at a time (`pendingTask` single-slot; concurrent requests
   queue via the socket accept loop)
