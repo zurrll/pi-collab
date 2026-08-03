@@ -222,10 +222,11 @@ tools work unchanged.
 
 **Requirements:**
 - Local machine: OpenSSH 6.7+ (Unix socket forwarding) — Linux/macOS
-- SSH key-based auth to the remote host (no password prompts)
+- SSH key-based auth to the remote host (password prompts are disabled
+  to protect the TUI; set up with `ssh-keygen` + `ssh-copy-id`)
 - The remote machine is running pi with pi-collab loaded
 
-**Setup (on the caller side):**
+**Register a single remote peer:**
 ```
 /collab remote add reviewer user@remote-host
 ```
@@ -235,14 +236,27 @@ establishes a persistent tunnel. You can now `delegate_to_colleague`,
 `review_by_colleague`, or `broadcast_to_colleagues` to `reviewer` as if
 it were local.
 
+**Register ALL peers on a host (no name):**
+```
+/collab remote add user@remote-host
+```
+
+Lists the remote registry, adds every running peer, and establishes a
+tunnel for each. Per-peer success/failure is reported.
+
 **Manage:**
 ```
 /collab remote list              # show configured remote peers + tunnel status
-/collab remote remove reviewer   # remove entry and close tunnel
-/collab stop reviewer            # also works for remote peers
+/collab remote refresh <name>    # re-fetch a record (new token/path after restart)
+/collab remote remove <name>     # remove entry and close tunnel
+/collab remote prune             # remove entries with no active tunnel
+/collab stop <name>              # also works for remote peers
 ```
 
 **Notes:**
+- If SSH key auth is not set up, the extension fails fast with clear
+  `ssh-keygen` / `ssh-copy-id` instructions instead of prompting for
+  a password (which would corrupt the TUI)
 - The remote peer must be reachable by name on the remote machine
   (it must have registered with pi-collab there)
 - Auth uses the remote peer's token fetched via SSH — same-user trust

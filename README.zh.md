@@ -216,10 +216,11 @@ Widget 在 turn 边界**和**心跳间隔（每 5 秒）刷新，新 spawn 的 p
 
 **要求：**
 - 本地：OpenSSH 6.7+（支持 Unix socket 转发）——Linux/macOS
-- 到远程主机使用 SSH 密钥认证（无密码提示）
+- 到远程主机使用 SSH 密钥认证（密码提示已禁用以保护 TUI；
+  用 `ssh-keygen` + `ssh-copy-id` 配置密钥）
 - 远程机器上运行了带 pi-collab 的 pi
 
-**设置（在调用方）：**
+**注册单个远程 peer：**
 ```
 /collab remote add reviewer user@remote-host
 ```
@@ -228,14 +229,26 @@ Widget 在 turn 边界**和**心跳间隔（每 5 秒）刷新，新 spawn 的 p
 本地 peer 一样对它调用 `delegate_to_colleague`、`review_by_colleague`、
 `broadcast_to_colleagues`。
 
+**批量注册主机上的所有 peer（不写名字）：**
+```
+/collab remote add user@remote-host
+```
+
+列出远程注册表，逐个添加所有正在运行的 peer 并为每个建立隧道，
+逐个报告成功/失败。
+
 **管理：**
 ```
 /collab remote list              # 查看远程 peer + 隧道状态
-/collab remote remove reviewer   # 删除条目并关闭隧道
-/collab stop reviewer            # 对远程 peer 同样有效
+/collab remote refresh <name>    # 重新拉取记录（重启后 token/路径变了）
+/collab remote remove <name>     # 删除条目并关闭隧道
+/collab remote prune             # 清理无活跃隧道的条目
+/collab stop <name>              # 对远程 peer 同样有效
 ```
 
 **注意：**
+- 如果没配置 SSH 密钥，扩展会快速失败并给出 `ssh-keygen` / `ssh-copy-id`
+  操作指引，而不是弹密码框（会破坏 TUI）
 - 远程 peer 必须在远程机器上已注册（那里也运行着 pi-collab）
 - 认证使用通过 SSH 获取的远程 peer token——同用户信任
 - 退出时自动关闭所有隧道
