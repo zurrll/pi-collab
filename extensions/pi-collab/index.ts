@@ -1314,6 +1314,58 @@ async function addAllRemotes(sshTarget: string, ctx: ExtensionCommandContext): P
   );
 }
 
+/**
+ * Two-way registration: register the remote host's peers locally, and
+ * register THIS local peer on the remote host so both sides can reach
+ * each other.
+ */
+async function addBothRemotes(
+  localTarget: string,
+  remoteTarget: string,
+  ctx: ExtensionCommandContext,
+): Promise<void> {
+  // 1. Register all remote peers locally (same as /collab remote add)
+  await addAllRemotes(remoteTarget, ctx);
+
+  // 2. Register THIS peer on the remote host. Its remotes dir is just
+  //    files, so we write the record via SSH — no command needed on the
+  //    remote pi side.
+  const self = getPeerById(peerId);
+  if (!self) {
+    ctx.ui.notify("This peer is not registered locally — cannot push to remote.", "error");
+    return;
+  }
+
+  const name = config.name;
+  const record: RemotePeer = {
+    name,
+    sshTarget: localTarget,
+    peerId: self.peerId,
+    remoteSocketPath: self.socketPath,
+    authToken: self.authToken ?? "",
+    model: self.model,
+    capabilities: self.capabilities,
+    addedAt: new Date().toISOString(),
+  };
+
+  ctx.ui.notify(`Registering this peer ("${name}") on ${remoteTarget}...`, "info");
+  try {
+    const json = JSON.stringify(record, null, 2).replace(/'/g, "'\\''");
+    await sshExec(
+      remoteTarget,
+      `mkdir -p ~/.pi/collab/remotes && cat > ~/.pi/collab/remotes/${name.replace(/[^\w.-]/g, "_")}.json <<'EOF'\n${json}\nEOF`,
+    );
+    ctx.ui.notify(
+      `Done. "${name}" is now registered on ${remoteTarget}.\n` +
+      `On the remote, run /collab remote list to verify, or just delegate to "${name}".`,
+      "info",
+    );
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    ctx.ui.notify(`Failed to register this peer on ${remoteTarget}: ${msg}`, "error");
+  }
+}
+
 async function remoteCommand(args: string, ctx: ExtensionCommandContext): Promise<void> {
   const parts = args.trim().split(/\s+/);
   const sub = parts[0];
@@ -1370,6 +1422,26 @@ async function remoteCommand(args: string, ctx: ExtensionCommandContext): Promis
         const msg = err instanceof CollabError ? err.label : (err instanceof Error ? err.message : String(err));
         ctx.ui.notify(`Failed to add remote peer: ${msg}`, "error");
       }
+      return;
+    }
+
+    case "add-both": {
+      // Add remote peer(s) locally AND register this local peer on the
+      // remote host, so both sides can see and reach each other.
+      // Usage: /collab remote add-both <local-user>@<local-host> <remote-user>@<remote-host>
+      const m = rest.match(/^(\S+)\s+(\S+)$/);
+      if (!m) {
+        ctx.ui.notify(
+          "Usage: /collab remote add-both <local-user>@<local-host> <remote-user>@<remote-host>\n" +
+          "Registers all peers on the remote host locally, and registers THIS peer\n" +
+          "on the remote host so both sides can reach each other.",
+          "warning",
+        );
+        return;
+      }
+      const localTarget = m[1];
+      const remoteTarget = m[2];
+      await addBothRemotes(localTarget, remoteTarget, ctx);
       return;
     }
 
@@ -1449,9 +1521,10 @@ async function remoteCommand(args: string, ctx: ExtensionCommandContext): Promis
 
     default:
       ctx.ui.notify(
-        "Usage: /collab remote add|remove|refresh|list|prune\n" +
+        "Usage: /collab remote add|add-both|remove|refresh|list|prune\n" +
         "  add <user@host>             — register ALL peers on the host\n" +
         "  add <name> <user@host>      — register one named peer\n" +
+        "  add-both <local> <remote>   — register remote peers + this peer on remote\n" +
         "  remove <name>               — unregister and close tunnel\n" +
         "  refresh <name>              — re-fetch record (new token/path)\n" +
         "  list                        — list configured remote peers\n" +
