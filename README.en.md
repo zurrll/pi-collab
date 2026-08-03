@@ -4,7 +4,9 @@ Multi-agent collaboration extension for pi. Enables multiple pi instances to
 communicate and collaborate on shared tasks — multiple terminals on the same
 host, or pi instances on remote machines over SSH.
 
-This README targets Linux/macOS users.
+> **Scope (v0.2.4):** local collaboration works on Linux/macOS/Windows;
+> **remote (SSH) collaboration currently requires Linux/macOS** — Windows
+> awaits the future WebSocket relay.
 
 ---
 

@@ -3,7 +3,8 @@
 pi 多 Agent 协作扩展。让多个 pi 实例互相通信、协同解决任务——同一主机上开多个
 终端，或通过 SSH 连接远程机器上的 pi。
 
-本 README 面向 Linux/macOS 用户。
+> **适用范围（v0.2.4）：** 本地协作支持 Linux/macOS/Windows；**远程协作
+> （SSH）目前仅支持 Linux/macOS**，Windows 需等后续 WebSocket relay。
 
 ---
 
