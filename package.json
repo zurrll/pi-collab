@@ -18,6 +18,7 @@
   "files": [
     "extensions/",
     "README.md",
+    "README.en.md",
     "README.zh.md",
     "VERIFICATION.md",
     "LICENSE"
