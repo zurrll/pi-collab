@@ -59,6 +59,14 @@ import {
 } from "./colleagues.ts";
 import { CollabError, fromProtocolCode } from "./errors.ts";
 import { isWindows } from "./transport/paths.ts";
+import { sshTunnelManager } from "./transport/ssh.ts";
+import {
+  addRemote,
+  getRemote,
+  listRemotes,
+  removeRemote,
+  type RemotePeer,
+} from "./discovery/remotes.ts";
 
 // ─── Module-level state ──────────────────────────────────────────────────────
 
@@ -112,6 +120,7 @@ function buildPeerWidgetLines(ctx: ExtensionContext): string[] {
   const peers = listPeers();
   const self = peers.find((p) => p.peerId === peerId);
   const others = peers.filter((p) => p.peerId !== peerId);
+  const remotes = listRemotes();
 
   const lines: string[] = [];
   const t = ctx.ui.theme;
@@ -134,7 +143,14 @@ function buildPeerWidgetLines(ctx: ExtensionContext): string[] {
     lines.push(`${icon} ${p.name}  ${t.fg("muted", p.model)}`);
   }
 
-  if (peers.length === 0) {
+  // Remote SSH peers (only show when a tunnel is up or they were recently added)
+  for (const r of remotes) {
+    const active = sshTunnelManager.names.includes(r.name);
+    const icon = active ? t.fg("success", "●") : t.fg("dim", "○");
+    lines.push(`${icon} ${r.name}  ${t.fg("muted", `ssh:${r.sshTarget}`)}`);
+  }
+
+  if (peers.length === 0 && remotes.length === 0) {
     lines.push(t.fg("dim", "  (no peers)"));
   }
 
@@ -299,8 +315,10 @@ async function authenticateConnection(
   targetPeerId: string,
   targetName: string,
 ): Promise<void> {
+  // Token comes from local PeerRecord or the cached remote entry
   const record = resolveName(targetName) ?? getPeerById(targetPeerId);
-  const token = record?.authToken;
+  const remote = getRemote(targetName);
+  const token = record?.authToken ?? remote?.authToken;
   if (!token) {
     await conn.close();
     throw new CollabError("auth_failed",
@@ -327,6 +345,84 @@ async function authenticateConnection(
     await conn.close();
     throw new CollabError("auth_failed", `Authentication rejected: ${payload.reason ?? "unknown"}`);
   }
+}
+
+/**
+ * Resolve a peer name to connection info, checking the local registry
+ * first, then remote SSH entries.
+ *
+ * For remote peers, ensures the SSH tunnel is up and returns the LOCAL
+ * socket path (the tunnel endpoint) plus the cached auth token.
+ */
+async function resolvePeer(name: string): Promise<{
+  kind: "local" | "remote";
+  peerId: string;
+  socketPath: string;
+  token: string | undefined;
+  record?: PeerRecord;
+  remote?: RemotePeer;
+}> {
+  // 1. Local registry
+  const record = resolveName(name);
+  if (record) {
+    return {
+      kind: "local",
+      peerId: record.peerId,
+      socketPath: record.socketPath,
+      token: record.authToken,
+      record,
+    };
+  }
+
+  // 2. Remote SSH entry
+  const remote = getRemote(name);
+  if (remote) {
+    const localPath = await sshTunnelManager.ensureTunnel(remote.name, remote.sshTarget, remote.remoteSocketPath);
+    return {
+      kind: "remote",
+      peerId: remote.peerId,
+      socketPath: localPath,
+      token: remote.authToken,
+      remote,
+    };
+  }
+
+  throw new CollabError("peer_not_found",
+    `Colleague "${name}" not found locally or as a remote SSH peer.`);
+}
+
+/**
+ * Get the available peers for display/broadcast: local peers + remote peers.
+ * Returns display entries without the local socket path complications.
+ */
+function listAllPeers(): Array<{
+  name: string;
+  peerId: string;
+  status: string;
+  model: string;
+  cwd?: string;
+  capabilities?: string[];
+  source: "local" | "remote";
+}> {
+  const local = listPeers().map((p) => ({
+    name: p.name,
+    peerId: p.peerId,
+    status: p.status,
+    model: p.model,
+    cwd: p.cwd,
+    capabilities: p.capabilities,
+    source: "local" as const,
+  }));
+  const remote = listRemotes().map((r) => ({
+    name: r.name,
+    peerId: r.peerId,
+    status: sshTunnelManager.names.includes(r.name) ? "idle" : "unreachable",
+    model: r.model ?? "unknown",
+    cwd: `ssh:${r.sshTarget}`,
+    capabilities: r.capabilities,
+    source: "remote" as const,
+  }));
+  return [...local, ...remote];
 }
 
 /**
@@ -380,20 +476,25 @@ async function probePeer(targetName: string, capability?: string): Promise<{
   capabilities?: string[];
   matched: boolean;
 }> {
-  const record = resolveName(targetName);
-  if (!record) {
-    throw new Error(`Colleague "${targetName}" not found`);
+  let peer: Awaited<ReturnType<typeof resolvePeer>>;
+  try {
+    peer = await resolvePeer(targetName);
+  } catch (err) {
+    if (err instanceof CollabError && err.code === "peer_not_found") {
+      throw new CollabError("peer_not_found", `Colleague "${targetName}" not found`);
+    }
+    throw err;
   }
 
   const conn = await transport.connect({
-    socketPath: record.socketPath,
-    peerId: record.peerId,
+    socketPath: peer.socketPath,
+    peerId: peer.peerId,
   });
 
   try {
-    await authenticateConnection(conn, record.peerId, targetName);
+    await authenticateConnection(conn, peer.peerId, targetName);
 
-    const probe = createProbeEnvelope(peerId, record.peerId, capability ? { capability } : {});
+    const probe = createProbeEnvelope(peerId, peer.peerId, capability ? { capability } : {});
     await conn.send(probe);
 
     const reader = conn.receive[Symbol.asyncIterator]();
@@ -465,16 +566,11 @@ async function delegateToPeer(
 ): Promise<DelegateResult> {
   if (signal?.aborted) throw new CollabError("cancelled", "Delegate aborted by user before connecting");
 
-  const record = resolveName(targetName);
-  if (!record) {
-    const available = listPeers().map((p) => p.name).join(", ") || "none";
-    throw new CollabError("peer_not_found",
-      `Colleague "${targetName}" not found in registry. Available: ${available}`);
-  }
+  const peer = await resolvePeer(targetName);
 
-  if (record.status === "unreachable") {
+  if (peer.kind === "local" && peer.record?.status === "unreachable") {
     throw new CollabError("peer_unreachable",
-      `Colleague "${targetName}" has been unreachable for over 30s (last heartbeat: ${record.lastHeartbeatAt})`);
+      `Colleague "${targetName}" has been unreachable for over 30s (last heartbeat: ${peer.record.lastHeartbeatAt})`);
   }
 
   const protocolConvId = randomUUID();
@@ -500,17 +596,17 @@ async function delegateToPeer(
   }
 
   const conn = await transport.connect({
-    socketPath: record.socketPath,
-    peerId: record.peerId,
+    socketPath: peer.socketPath,
+    peerId: peer.peerId,
   });
 
-  await authenticateConnection(conn, record.peerId, targetName);
+  await authenticateConnection(conn, peer.peerId, targetName);
 
   const result = await runConversation(
     conn,
     protocolConvId,
     peerId,
-    record.peerId,
+    peer.peerId,
     operation,
     fullTask,
     options,
@@ -912,7 +1008,7 @@ function registerCommands(pi: ExtensionAPI): void {
   pi.registerCommand("collab", {
     description: "Manage collaboration peers",
     getArgumentCompletions: (prefix: string) => {
-      const subcommands = ["spawn", "list", "stop", "start", "rename", "status", "delegate", "token", "templates"];
+      const subcommands = ["spawn", "list", "stop", "start", "rename", "status", "delegate", "token", "templates", "remote"];
       const parts = prefix.trim().split(/\s+/);
 
       if (parts.length <= 1) {
@@ -957,9 +1053,10 @@ function registerCommands(pi: ExtensionAPI): void {
         case "delegate": return delegateCommand(rest, ctx);
         case "token": return tokenCommand(ctx);
         case "templates": return templatesCommand(ctx);
+        case "remote": return remoteCommand(rest, ctx);
         default:
           ctx.ui.notify(
-            "Usage: /collab spawn|list|stop|start|rename|status|delegate|token|templates",
+            "Usage: /collab spawn|list|stop|start|rename|status|delegate|token|templates|remote",
             "warning",
           );
       }
@@ -1101,9 +1198,133 @@ function templatesCommand(ctx: ExtensionCommandContext): void {
   ctx.ui.notify(lines.join("\n"), "info");
 }
 
+// ── /collab remote — cross-host SSH peers ────────────────────────────────────
+
+function sshExec(sshTarget: string, command: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("ssh", [sshTarget, command], { stdio: ["ignore", "pipe", "pipe"] });
+    const chunks: Buffer[] = [];
+    const errChunks: Buffer[] = [];
+    child.stdout.on("data", (d) => chunks.push(d));
+    child.stderr.on("data", (d) => errChunks.push(d));
+    child.on("error", (err) => reject(new Error(`SSH error: ${err.message}`)));
+    child.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(`SSH command failed (${code}): ${Buffer.concat(errChunks).toString().trim()}`));
+      } else {
+        resolve(Buffer.concat(chunks).toString().trim());
+      }
+    });
+  });
+}
+
+async function fetchRemoteRecord(sshTarget: string, name: string): Promise<PeerRecord> {
+  // Read the name pointer, then the full record. Escape the name for the shell.
+  const safeName = name.replace(/[^\w.-]/g, "_");
+  const pointerOut = await sshExec(sshTarget, `cat ~/.pi/collab/peers/by-name/${safeName}.json`);
+  let pointer: { peerId: string };
+  try {
+    pointer = JSON.parse(pointerOut);
+  } catch {
+    throw new CollabError("peer_not_found",
+      `Remote peer "${name}" not found on ${sshTarget}. Is pi-collab running there?`);
+  }
+  const recordOut = await sshExec(sshTarget, `cat ~/.pi/collab/peers/by-id/${pointer.peerId}.json`);
+  try {
+    return JSON.parse(recordOut) as PeerRecord;
+  } catch {
+    throw new CollabError("peer_unreachable",
+      `Remote peer "${name}" registered but its record is unreadable on ${sshTarget}.`);
+  }
+}
+
+async function remoteCommand(args: string, ctx: ExtensionCommandContext): Promise<void> {
+  const parts = args.trim().split(/\s+/);
+  const sub = parts[0];
+  const rest = parts.slice(1).join(" ");
+
+  switch (sub) {
+    case "add": {
+      const m = rest.match(/^(\S+)\s+(\S+)$/);
+      if (!m) {
+        ctx.ui.notify("Usage: /collab remote add <name> <user@host>", "warning");
+        return;
+      }
+      const name = m[1];
+      const sshTarget = m[2];
+      if (isWindows) {
+        ctx.ui.notify("SSH transport requires Unix socket forwarding — not supported on Windows yet.", "error");
+        return;
+      }
+      ctx.ui.notify(`Fetching remote peer "${name}" from ${sshTarget}...`, "info");
+      try {
+        const record = await fetchRemoteRecord(sshTarget, name);
+        const remote: RemotePeer = {
+          name,
+          sshTarget,
+          peerId: record.peerId,
+          remoteSocketPath: record.socketPath,
+          authToken: record.authToken ?? "",
+          model: record.model,
+          capabilities: record.capabilities,
+          addedAt: new Date().toISOString(),
+        };
+        addRemote(remote);
+        // Establish tunnel immediately so the peer is reachable
+        const localPath = await sshTunnelManager.ensureTunnel(name, sshTarget, record.socketPath);
+        ctx.ui.notify(
+          `Remote peer "${name}" added (${sshTarget}). Tunnel: ${localPath}\n` +
+          `Model: ${record.model}  Capabilities: ${record.capabilities?.join(", ") ?? "none"}`,
+          "info",
+        );
+      } catch (err: unknown) {
+        const msg = err instanceof CollabError ? err.label : (err instanceof Error ? err.message : String(err));
+        ctx.ui.notify(`Failed to add remote peer: ${msg}`, "error");
+      }
+      return;
+    }
+
+    case "remove": {
+      const name = rest.trim();
+      if (!name) {
+        ctx.ui.notify("Usage: /collab remote remove <name>", "warning");
+        return;
+      }
+      sshTunnelManager.closeTunnel(name);
+      const removed = removeRemote(name);
+      ctx.ui.notify(removed ? `Remote peer "${name}" removed.` : `Remote peer "${name}" not found.`, removed ? "info" : "warning");
+      return;
+    }
+
+    case "list": {
+      const remotes = listRemotes();
+      if (remotes.length === 0) {
+        ctx.ui.notify("No remote peers configured. Use /collab remote add <name> <user@host>.", "info");
+        return;
+      }
+      const lines = remotes.map((r) => {
+        const active = sshTunnelManager.names.includes(r.name) ? "connected" : "tunnel down";
+        return `  ${r.name} — ${r.sshTarget} — ${active} — ${r.model ?? "unknown"}`;
+      });
+      ctx.ui.notify(`${remotes.length} remote peer(s):\n${lines.join("\n")}`, "info");
+      return;
+    }
+
+    default:
+      ctx.ui.notify(
+        "Usage: /collab remote add|remove|list\n" +
+        "  add <name> <user@host>    — register a remote peer over SSH\n" +
+        "  remove <name>             — unregister and close tunnel\n" +
+        "  list                      — list configured remote peers",
+        "warning",
+      );
+  }
+}
+
 function listPeersCommand(ctx: ExtensionCommandContext): void {
   const peers = listPeers();
-  if (peers.length === 0) {
+  const remotes = listRemotes();
+  if (peers.length === 0 && remotes.length === 0) {
     ctx.ui.notify("No registered peers.", "info");
     return;
   }
@@ -1116,6 +1337,10 @@ function listPeersCommand(ctx: ExtensionCommandContext): void {
   for (const p of others) {
     lines.push(`  ${p.name} — ${p.status} — ${p.model}`);
   }
+  for (const r of remotes) {
+    const active = sshTunnelManager.names.includes(r.name) ? "connected" : "tunnel down";
+    lines.push(`  ${r.name} — ${active} — ${r.model ?? "unknown"}  (ssh:${r.sshTarget})`);
+  }
   ctx.ui.notify(lines.join("\n"), "info");
 }
 
@@ -1127,6 +1352,14 @@ function stopPeerCommand(name: string, ctx: ExtensionCommandContext): void {
 
   const peer = resolveName(name);
   if (!peer) {
+    // Maybe a remote peer
+    const remote = getRemote(name);
+    if (remote) {
+      sshTunnelManager.closeTunnel(name);
+      removeRemote(name);
+      ctx.ui.notify(`Remote peer "${name}" removed and tunnel closed.`, "info");
+      return;
+    }
     ctx.ui.notify(`Colleague "${name}" not found.`, "error");
     return;
   }
@@ -1383,6 +1616,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = undefined; }
     widgetCtx = undefined;
     if (listener) { await listener.close(); listener = undefined; }
+    await sshTunnelManager.closeAll();
     authToken = "";
     clearPeerWidget(ctx);
     unregisterPeer(peerId, config.name);
