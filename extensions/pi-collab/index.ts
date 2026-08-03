@@ -143,10 +143,11 @@ function buildPeerWidgetLines(ctx: ExtensionContext): string[] {
     lines.push(`${icon} ${p.name}  ${t.fg("muted", p.model)}`);
   }
 
-  // Remote SSH peers (only show when a tunnel is up or they were recently added)
+  // Remote SSH peers — only show those with an active tunnel,
+  // so failed/ghost entries don't clutter the widget.
   for (const r of remotes) {
-    const active = sshTunnelManager.names.includes(r.name);
-    const icon = active ? t.fg("success", "●") : t.fg("dim", "○");
+    if (!sshTunnelManager.names.includes(r.name)) continue;
+    const icon = t.fg("success", "●");
     lines.push(`${icon} ${r.name}  ${t.fg("muted", `ssh:${r.sshTarget}`)}`);
   }
 
@@ -1276,6 +1277,9 @@ async function remoteCommand(args: string, ctx: ExtensionCommandContext): Promis
           "info",
         );
       } catch (err: unknown) {
+        // Roll back the cached entry if the tunnel couldn't be established,
+        // so a failed add never leaves an unreachable ghost peer behind.
+        removeRemote(name);
         const msg = err instanceof CollabError ? err.label : (err instanceof Error ? err.message : String(err));
         ctx.ui.notify(`Failed to add remote peer: ${msg}`, "error");
       }
@@ -1342,13 +1346,28 @@ async function remoteCommand(args: string, ctx: ExtensionCommandContext): Promis
       return;
     }
 
+    case "prune": {
+      const stale = listRemotes().filter((r) => !sshTunnelManager.names.includes(r.name));
+      if (stale.length === 0) {
+        ctx.ui.notify("No stale remote entries to prune.", "info");
+        return;
+      }
+      for (const r of stale) {
+        removeRemote(r.name);
+      }
+      ctx.ui.notify(`Pruned ${stale.length} unreachable remote entr${stale.length === 1 ? "y" : "ies"}: ` +
+        stale.map((r) => r.name).join(", "), "info");
+      return;
+    }
+
     default:
       ctx.ui.notify(
-        "Usage: /collab remote add|remove|refresh|list\n" +
+        "Usage: /collab remote add|remove|refresh|list|prune\n" +
         "  add <name> <user@host>      — register a remote peer over SSH\n" +
         "  remove <name>               — unregister and close tunnel\n" +
         "  refresh <name>              — re-fetch record (new token/path)\n" +
-        "  list                        — list configured remote peers",
+        "  list                        — list configured remote peers\n" +
+        "  prune                       — remove entries with no active tunnel",
         "warning",
       );
   }
