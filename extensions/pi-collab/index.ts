@@ -59,7 +59,7 @@ import {
 } from "./colleagues.ts";
 import { CollabError, fromProtocolCode } from "./errors.ts";
 import { isWindows } from "./transport/paths.ts";
-import { sshTunnelManager } from "./transport/ssh.ts";
+import { sshTunnelManager, sshExec } from "./transport/ssh.ts";
 import {
   addRemote,
   getRemote,
@@ -800,6 +800,10 @@ function registerTools(pi: ExtensionAPI): void {
       const targets = listAllPeers().filter((p) => {
         if (p.peerId === peerId) return false;
         if (filter?.length && !filter.includes(p.name)) return false;
+        // Remote peers: always attempt — the tunnel is established lazily
+        // inside probePeer/resolvePeer. Excluding by tunnel state would
+        // make them invisible to the LLM.
+        if (p.source === "remote") return true;
         return p.status !== "unreachable";
       });
 
@@ -1200,28 +1204,22 @@ function templatesCommand(ctx: ExtensionCommandContext): void {
 
 // ── /collab remote — cross-host SSH peers ────────────────────────────────────
 
-function sshExec(sshTarget: string, command: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const child = spawn("ssh", [sshTarget, command], { stdio: ["ignore", "pipe", "pipe"] });
-    const chunks: Buffer[] = [];
-    const errChunks: Buffer[] = [];
-    child.stdout.on("data", (d) => chunks.push(d));
-    child.stderr.on("data", (d) => errChunks.push(d));
-    child.on("error", (err) => reject(new Error(`SSH error: ${err.message}`)));
-    child.on("close", (code) => {
-      if (code !== 0) {
-        reject(new Error(`SSH command failed (${code}): ${Buffer.concat(errChunks).toString().trim()}`));
-      } else {
-        resolve(Buffer.concat(chunks).toString().trim());
-      }
-    });
-  });
-}
-
 async function fetchRemoteRecord(sshTarget: string, name: string): Promise<PeerRecord> {
   // Read the name pointer, then the full record. Escape the name for the shell.
   const safeName = name.replace(/[^\w.-]/g, "_");
-  const pointerOut = await sshExec(sshTarget, `cat ~/.pi/collab/peers/by-name/${safeName}.json`);
+  let pointerOut: string;
+  try {
+    pointerOut = await sshExec(sshTarget, `cat ~/.pi/collab/peers/by-name/${safeName}.json`);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/Permission denied|password|publickey|key/i.test(msg)) {
+      throw new CollabError("auth_failed",
+        `Cannot reach ${sshTarget}: SSH key auth required (password prompts are disabled to protect the TUI). ` +
+        `Set up keys with: ssh-copy-id ${sshTarget}`);
+    }
+    throw new CollabError("peer_unreachable",
+      `Cannot reach remote peer "${name}" on ${sshTarget}: ${msg}`);
+  }
   let pointer: { peerId: string };
   try {
     pointer = JSON.parse(pointerOut);
