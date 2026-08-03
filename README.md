@@ -207,7 +207,44 @@ to the target's PeerRecord, establishing same-user trust.
 | Platform | Transport |
 |----------|-----------|
 | Linux / macOS | Unix domain sockets |
+| Linux / macOS (remote) | SSH Unix socket forwarding |
 | Windows 10+ (Build 17063+) | Windows named pipes |
+
+## Cross-Host Collaboration (SSH)
+
+Connect to peers on other machines via SSH. Works by forwarding the remote
+peer's Unix socket to a local path (`ssh -L`), so the existing protocol and
+tools work unchanged.
+
+**Requirements:**
+- Local machine: OpenSSH 6.7+ (Unix socket forwarding) — Linux/macOS
+- SSH key-based auth to the remote host (no password prompts)
+- The remote machine is running pi with pi-collab loaded
+
+**Setup (on the caller side):**
+```
+/collab remote add reviewer user@remote-host
+```
+
+This fetches the remote peer's record over SSH, caches it locally, and
+establishes a persistent tunnel. You can now `delegate_to_colleague`,
+`review_by_colleague`, or `broadcast_to_colleagues` to `reviewer` as if
+it were local.
+
+**Manage:**
+```
+/collab remote list              # show configured remote peers + tunnel status
+/collab remote remove reviewer   # remove entry and close tunnel
+/collab stop reviewer            # also works for remote peers
+```
+
+**Notes:**
+- The remote peer must be reachable by name on the remote machine
+  (it must have registered with pi-collab there)
+- Auth uses the remote peer's token fetched via SSH — same-user trust
+- Tunnels are closed automatically on exit
+- Windows does not support this transport yet (Win32-OpenSSH lacks
+  Unix socket forwarding); use a WebSocket relay instead (Phase 2)
 
 ## Architecture
 

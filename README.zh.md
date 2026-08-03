@@ -202,7 +202,41 @@ Widget 在 turn 边界**和**心跳间隔（每 5 秒）刷新，新 spawn 的 p
 | 平台 | 传输方式 |
 |------|---------|
 | Linux / macOS | Unix domain socket |
+| Linux / macOS（远程） | SSH Unix socket 转发 |
 | Windows 10+ (Build 17063+) | Windows named pipe |
+
+## 跨主机协作（SSH）
+
+通过 SSH 连接其他机器上的 peer。原理是把远程 peer 的 Unix socket 转发到本地
+路径（`ssh -L`），现有协议和工具零改动即可工作。
+
+**要求：**
+- 本地：OpenSSH 6.7+（支持 Unix socket 转发）——Linux/macOS
+- 到远程主机使用 SSH 密钥认证（无密码提示）
+- 远程机器上运行了带 pi-collab 的 pi
+
+**设置（在调用方）：**
+```
+/collab remote add reviewer user@remote-host
+```
+
+这会通过 SSH 拉取远程 peer 的记录、缓存到本地并建立持久隧道。之后就可以像
+本地 peer 一样对它调用 `delegate_to_colleague`、`review_by_colleague`、
+`broadcast_to_colleagues`。
+
+**管理：**
+```
+/collab remote list              # 查看远程 peer + 隧道状态
+/collab remote remove reviewer   # 删除条目并关闭隧道
+/collab stop reviewer            # 对远程 peer 同样有效
+```
+
+**注意：**
+- 远程 peer 必须在远程机器上已注册（那里也运行着 pi-collab）
+- 认证使用通过 SSH 获取的远程 peer token——同用户信任
+- 退出时自动关闭所有隧道
+- Windows 暂不支持此传输（Win32-OpenSSH 无 Unix socket 转发）；
+  后续用 WebSocket relay 解决（Phase 2）
 
 ## 架构
 
