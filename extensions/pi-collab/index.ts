@@ -1237,6 +1237,83 @@ async function fetchRemoteRecord(sshTarget: string, name: string): Promise<PeerR
   }
 }
 
+/**
+ * Pre-flight check: verify SSH key-based auth works before any remote op.
+ * Password prompts are disabled (BatchMode), so without keys this fails fast
+ * with a clear message instead of corrupting the TUI.
+ */
+async function checkSshAccess(sshTarget: string): Promise<void> {
+  try {
+    await sshExec(sshTarget, "true");
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/Permission denied|password|publickey|key/i.test(msg)) {
+      throw new CollabError("auth_failed",
+        `SSH key auth to ${sshTarget} failed. Password prompts are disabled to protect the TUI.\n` +
+        `Set up keys:\n  ssh-keygen -t ed25519\n  ssh-copy-id ${sshTarget}\n` +
+        `Then verify: ssh ${sshTarget} "echo ok"`);
+    }
+    throw new CollabError("peer_unreachable", `Cannot reach ${sshTarget}: ${msg}`);
+  }
+}
+
+/**
+ * Register ALL peers running on a remote host. Lists the remote registry's
+ * by-name directory and adds every peer as a remote entry.
+ */
+async function addAllRemotes(sshTarget: string, ctx: ExtensionCommandContext): Promise<void> {
+  await checkSshAccess(sshTarget);
+  ctx.ui.notify(`Fetching all peers from ${sshTarget}...`, "info");
+
+  let names: string[];
+  try {
+    const out = await sshExec(sshTarget, "ls ~/.pi/collab/peers/by-name/ 2>/dev/null | sed 's/\\.json$//'");
+    names = out.split(/\n/).map((s) => s.trim()).filter(Boolean);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new CollabError("peer_unreachable",
+      `Cannot list peers on ${sshTarget}: ${msg}. Is pi-collab running there?`);
+  }
+
+  if (names.length === 0) {
+    ctx.ui.notify(`No peers registered on ${sshTarget}.`, "warning");
+    return;
+  }
+
+  const ok: string[] = [];
+  const fail: string[] = [];
+
+  for (const name of names) {
+    try {
+      const record = await fetchRemoteRecord(sshTarget, name);
+      const remote: RemotePeer = {
+        name,
+        sshTarget,
+        peerId: record.peerId,
+        remoteSocketPath: record.socketPath,
+        authToken: record.authToken ?? "",
+        model: record.model,
+        capabilities: record.capabilities,
+        addedAt: new Date().toISOString(),
+      };
+      addRemote(remote);
+      const localPath = await sshTunnelManager.ensureTunnel(name, sshTarget, record.socketPath);
+      ok.push(name);
+      ctx.ui.notify(`  ✓ ${name} — ${record.model} (${localPath})`, "info");
+    } catch (err: unknown) {
+      removeRemote(name);
+      fail.push(name);
+      ctx.ui.notify(`  ✗ ${name}: ${err instanceof Error ? err.message : String(err)}`, "error");
+    }
+  }
+
+  ctx.ui.notify(
+    `Remote sync from ${sshTarget}: ${ok.length} added, ${fail.length} failed.` +
+    (fail.length ? ` Failed: ${fail.join(", ")}` : ""),
+    fail.length ? "warning" : "info",
+  );
+}
+
 async function remoteCommand(args: string, ctx: ExtensionCommandContext): Promise<void> {
   const parts = args.trim().split(/\s+/);
   const sub = parts[0];
@@ -1244,19 +1321,29 @@ async function remoteCommand(args: string, ctx: ExtensionCommandContext): Promis
 
   switch (sub) {
     case "add": {
-      const m = rest.match(/^(\S+)\s+(\S+)$/);
-      if (!m) {
-        ctx.ui.notify("Usage: /collab remote add <name> <user@host>", "warning");
-        return;
-      }
-      const name = m[1];
-      const sshTarget = m[2];
       if (isWindows) {
         ctx.ui.notify("SSH transport requires Unix socket forwarding — not supported on Windows yet.", "error");
         return;
       }
+
+      const m = rest.match(/^(\S+)\s+(\S+)$/);
+      if (!m) {
+        // No <name> given — register ALL peers on the remote host.
+        const sshTarget = rest.trim();
+        if (!sshTarget) {
+          ctx.ui.notify("Usage: /collab remote add <user@host>  (all peers)\n" +
+            "       /collab remote add <name> <user@host>  (one peer)", "warning");
+          return;
+        }
+        await addAllRemotes(sshTarget, ctx);
+        return;
+      }
+
+      const name = m[1];
+      const sshTarget = m[2];
       ctx.ui.notify(`Fetching remote peer "${name}" from ${sshTarget}...`, "info");
       try {
+        await checkSshAccess(sshTarget);
         const record = await fetchRemoteRecord(sshTarget, name);
         const remote: RemotePeer = {
           name,
@@ -1363,7 +1450,8 @@ async function remoteCommand(args: string, ctx: ExtensionCommandContext): Promis
     default:
       ctx.ui.notify(
         "Usage: /collab remote add|remove|refresh|list|prune\n" +
-        "  add <name> <user@host>      — register a remote peer over SSH\n" +
+        "  add <user@host>             — register ALL peers on the host\n" +
+        "  add <name> <user@host>      — register one named peer\n" +
         "  remove <name>               — unregister and close tunnel\n" +
         "  refresh <name>              — re-fetch record (new token/path)\n" +
         "  list                        — list configured remote peers\n" +
