@@ -10,7 +10,7 @@ same host to communicate and collaborate on shared tasks.
 pi install npm:pi-collab
 
 # From GitHub
-pi install git:github.com/zurrll/pi-collab@v0.2.1
+pi install git:github.com/zurrll/pi-collab@v0.2.4
 ```
 
 Or for development, load directly without installing:/
@@ -209,6 +209,10 @@ to the target's PeerRecord, establishing same-user trust.
 | Linux / macOS | Unix domain sockets |
 | Linux / macOS (remote) | SSH Unix socket forwarding |
 | Windows 10+ (Build 17063+) | Windows named pipes |
+
+> **v0.2.4 fix:** Linux/macOS socket binding now creates `~/.pi/collab/socks/`
+> correctly (previous versions created the wrong directory, causing
+> "Failed to bind socket" on Unix).
 
 ## Cross-Host Collaboration (SSH)
 

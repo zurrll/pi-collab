@@ -9,7 +9,7 @@ pi 多 Agent 协作扩展。让同一主机上的多个 pi 实例互相通信、
 pi install npm:pi-collab
 
 # GitHub 安装
-pi install git:github.com/zurrll/pi-collab@v0.2.1
+pi install git:github.com/zurrll/pi-collab@v0.2.4
 ```
 
 开发时也可以不安装，直接加载：
@@ -204,6 +204,10 @@ Widget 在 turn 边界**和**心跳间隔（每 5 秒）刷新，新 spawn 的 p
 | Linux / macOS | Unix domain socket |
 | Linux / macOS（远程） | SSH Unix socket 转发 |
 | Windows 10+ (Build 17063+) | Windows named pipe |
+
+> **v0.2.4 修复：** Linux/macOS 的 socket 绑定现在会正确创建
+> `~/.pi/collab/socks/` 目录（旧版本创建了错误目录，导致 Unix 上
+> 报 "Failed to bind socket"）。
 
 ## 跨主机协作（SSH）
 
