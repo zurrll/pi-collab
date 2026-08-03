@@ -135,11 +135,30 @@ To stop the spawned peer:
 ### Known Limitations
 
 - **Blocking delegation only**: `delegate_to_colleague` is fire-and-wait. If the remote peer calls `ask_colleague` (a clarifying question), the caller responds with a generic "cannot answer during blocking delegation" message. Use two interactive sessions with explicit `/collab` commands for multi-turn consultation.
-- **Same-host only**: Phase 1. Cross-host needs Radius WebSocket relay (not yet built).
 - **No tool set syncing**: Each peer uses its own tools. The caller does not know what tools the target has.
-- **Windows**: Unix domain sockets on Windows require Build 17063+. The path format in `registry.ts` may need `\\\\.\\pipe\\` prefix adaptation.
+- **Single inbound request at a time**: `pendingTask` single-slot; concurrent requests queue.
+- **Windows**: named pipes require Build 17063+. SSH remote transport is not yet supported on Windows.
 
 ---
+
+## Cross-Host Verification (SSH)
+
+Requires Linux/macOS on both ends + SSH key auth.
+
+1. Set up keys: `ssh-keygen -t ed25519 && ssh-copy-id <user>@<host>` and verify passwordless login.
+2. On the remote, start pi with pi-collab and register a peer (e.g. `/collab rename reviewer`).
+3. On the local side, register the remote peers:
+   ```
+   /collab remote add <user>@<host>
+   /collab remote list
+   ```
+4. For two-way reachability: `/collab remote add-both <local>@<local-addr> <remote-user>@<remote-host>`.
+5. Delegate a task to the remote peer and verify the result returns.
+
+If `remote add` fails with an auth error, keys are not set up. If the tunnel
+reports "not functional", the remote peer is offline or its socket is missing
+— run `/collab remote refresh <name>` after bringing it back.
+
 
 ## Directory Layout After Running
 
@@ -152,6 +171,10 @@ To stop the spawned peer:
 │   │   └── <uuid>.json
 │   └── by-name/
 │       └── <name>.json   # { "peerId": "..." }
+├── remotes/
+│   └── <name>.json       # remote SSH peer cache (after /collab remote add)
+├── ssh/
+│   └── <name>.sock       # local tunnel endpoints (active while connected)
 └── socks/
     └── <uuid>.sock
 ```

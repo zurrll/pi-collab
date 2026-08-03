@@ -3,7 +3,7 @@
 pi 多 Agent 协作扩展。让多个 pi 实例互相通信、协同解决任务——同一主机上开多个
 终端，或通过 SSH 连接远程机器上的 pi。
 
-> **适用范围（v0.2.4）：** 本地协作支持 Linux/macOS/Windows；**远程协作
+> **适用范围（v0.2.5）：** 本地协作支持 Linux/macOS/Windows；**远程协作
 > （SSH）目前仅支持 Linux/macOS**，Windows 需等后续 WebSocket relay。
 
 ---
@@ -35,7 +35,7 @@ pi 多 Agent 协作扩展。让多个 pi 实例互相通信、协同解决任务
 pi install npm:pi-collab
 
 # GitHub 安装（指定版本）
-pi install git:github.com/zurrll/pi-collab@v0.2.4
+pi install git:github.com/zurrll/pi-collab@v0.2.5
 ```
 
 开发时直接加载（不安装）：

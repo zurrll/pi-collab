@@ -4,7 +4,7 @@ Multi-agent collaboration extension for pi. Enables multiple pi instances to
 communicate and collaborate on shared tasks — multiple terminals on the same
 host, or pi instances on remote machines over SSH.
 
-> **Scope (v0.2.4):** local collaboration works on Linux/macOS/Windows;
+> **Scope (v0.2.5):** local collaboration works on Linux/macOS/Windows;
 > **remote (SSH) collaboration currently requires Linux/macOS** — Windows
 > awaits the future WebSocket relay.
 
@@ -37,7 +37,7 @@ host, or pi instances on remote machines over SSH.
 pi install npm:pi-collab
 
 # From GitHub (pinned version)
-pi install git:github.com/zurrll/pi-collab@v0.2.4
+pi install git:github.com/zurrll/pi-collab@v0.2.5
 ```
 
 For development, load directly without installing:
