@@ -1,44 +1,46 @@
 # pi-collab
 
-pi 多 Agent 协作扩展。让多个 pi 实例互相通信、协同解决任务——同一主机上开多个
-终端，或通过 SSH 连接远程机器上的 pi。
+Multi-agent collaboration extension for pi. Enables multiple pi instances to
+communicate and collaborate on shared tasks — multiple terminals on the same
+host, or pi instances on remote machines over SSH.
 
-> **适用范围（v0.2.4）：** 本地协作支持 Linux/macOS/Windows；**远程协作
-> （SSH）目前仅支持 Linux/macOS**，Windows 需等后续 WebSocket relay。
-
----
-
-## 目录
-
-- [安装](#安装)
-- [快速上手：本地双终端协作](#快速上手本地双终端协作)
-- [概念与原理](#概念与原理)
-- [命令总览](#命令总览)
-- [LLM 工具](#llm-工具)
-- [同事模板](#同事模板)
-- [能力广播](#能力广播)
-- [Peer 状态 Widget](#peer-状态-widget)
-- [跨主机协作（SSH）](#跨主机协作ssh)
-- [认证机制](#认证机制)
-- [环境变量](#环境变量)
-- [错误处理](#错误处理)
-- [平台支持](#平台支持)
-- [文件结构](#文件结构)
-- [限制（Phase 1）](#限制phase-1)
+> **Scope (v0.2.4):** local collaboration works on Linux/macOS/Windows;
+> **remote (SSH) collaboration currently requires Linux/macOS** — Windows
+> awaits the future WebSocket relay.
 
 ---
 
-## 安装
+## Table of Contents
+
+- [Install](#install)
+- [Quick Start: Two Local Terminals](#quick-start-two-local-terminals)
+- [Concepts & Design](#concepts--design)
+- [Commands](#commands)
+- [LLM Tools](#llm-tools)
+- [Colleague Templates](#colleague-templates)
+- [Capability Broadcasting](#capability-broadcasting)
+- [Peer Status Widget](#peer-status-widget)
+- [Cross-Host Collaboration (SSH)](#cross-host-collaboration-ssh)
+- [Authentication](#authentication)
+- [Environment Variables](#environment-variables)
+- [Error Handling](#error-handling)
+- [Platform Support](#platform-support)
+- [File Structure](#file-structure)
+- [Limitations (Phase 1)](#limitations-phase-1)
+
+---
+
+## Install
 
 ```bash
-# npm 安装
+# From npm
 pi install npm:pi-collab
 
-# GitHub 安装（指定版本）
+# From GitHub (pinned version)
 pi install git:github.com/zurrll/pi-collab@v0.2.4
 ```
 
-开发时直接加载（不安装）：
+For development, load directly without installing:
 
 ```bash
 pi -e /path/to/pi-collab/extensions/pi-collab/index.ts
@@ -46,389 +48,406 @@ pi -e /path/to/pi-collab/extensions/pi-collab/index.ts
 
 ---
 
-## 快速上手：本地双终端协作
+## Quick Start: Two Local Terminals
 
-打开两个终端，进入同一目录。
+Open two terminals in the same directory.
 
-**终端 1：**
+**Terminal 1:**
 ```bash
 pi -e pi-collab
 /collab rename architect
 ```
 
-**终端 2：**
+**Terminal 2:**
 ```bash
 pi -e pi-collab
 /collab rename reviewer
 ```
 
-**终端 1 — 确认双方被发现：**
+**Terminal 1 — verify discovery:**
 ```
 /collab list
 ```
 
-**终端 1 — 委托任务：**
+**Terminal 1 — delegate a task:**
 ```
-让 reviewer 审查 package.json，关注正确性和完整性。
+Have reviewer review package.json, focusing on correctness and completeness.
 ```
 
-agent 会自动调用 `delegate_to_colleague` 工具，把任务发给 reviewer。reviewer
-在自己的独立上下文窗口中处理，完成后结果返回终端 1。
+The agent automatically calls the `delegate_to_colleague` tool to send the task
+to reviewer. Reviewer processes it in its own isolated context window and
+returns the result.
 
 ---
 
-## 概念与原理
+## Concepts & Design
 
-### 核心概念
+### Core Concepts
 
-| 术语 | 含义 |
-|------|------|
-| **Peer** | 一个运行了 pi-collab 的 pi 实例 |
-| **同事 (Colleague)** | peer 的可读名字，如 `reviewer`、`architect` |
-| **Mesh** | 当前所有可达的 peer 集合 |
-| **Envelope** | 两个 peer 之间传输的消息信封（JSONL） |
-| **会话 (Conversation)** | 两个 peer 之间的一次多轮交换 |
+| Term | Meaning |
+|------|---------|
+| **Peer** | A pi instance running pi-collab |
+| **Colleague** | A peer's human-readable name, e.g. `reviewer`, `architect` |
+| **Mesh** | The set of all currently reachable peers |
+| **Envelope** | A JSONL message exchanged between two peers |
+| **Conversation** | A multi-turn exchange between two peers |
 
-### 架构分层
+### Architecture Layers
 
 ```
 ┌──────────────────────────────────────────────┐
-│  TUI 层       peer 状态 widget, 工具渲染     │
+│  TUI layer    peer status widget, tool render│
 ├──────────────────────────────────────────────┤
-│  Tool 层      delegate, broadcast, review,   │
-│               ask_colleague + 同事模板       │
+│  Tool layer   delegate, broadcast, review,   │
+│               ask_colleague + templates      │
 ├──────────────────────────────────────────────┤
-│  Protocol 层  envelope, 会话状态机           │
+│  Protocol     envelope, conversation state   │
 ├──────────────────────────────────────────────┤
-│  Auth 层      token 验证（文件系统信任锚）   │
+│  Auth         token verification (fs anchor) │
 ├──────────────────────────────────────────────┤
-│  Transport 层  Unix socket / SSH 隧道        │
+│  Transport    Unix socket / SSH tunnel       │
 ├──────────────────────────────────────────────┤
-│  Discovery 层  文件系统注册表（+ 远程缓存）  │
+│  Discovery    filesystem registry (+remote)  │
 └──────────────────────────────────────────────┘
 ```
 
-每一层可独立替换。例如跨主机只换 Transport + Discovery，上层零改动。
+Each layer is independently replaceable. Cross-host support swaps only
+Transport + Discovery; the upper layers are untouched.
 
-### 设计要点
+### Design Notes
 
-- **对等节点**：无中心调度器，每个 peer 既是 client 也是 server
-- **OOB 探测**：`probe`/`ping`/`pong` 在传输层直接处理，不进入 LLM 上下文，
-  零 token 消耗
-- **文件系统信任锚**：peer 的 auth token 存在注册表文件里，能读到文件 =
-  同用户进程（详见[认证机制](#认证机制)）
-- **消息标注**：注入到同事 agent 的任务带 ASCII 框头，标注来源同事名称，
-  防止 LLM 把同事消息当成用户指令
-
----
-
-## 命令总览
-
-所有命令支持 Tab 补全（子命令、peer 名称、模板名称）。
-
-| 命令 | 说明 |
-|------|------|
-| `/collab spawn <name\|template>` | 启动一个无头 peer。支持 `--model`、`--prompt`、`--name`、`--tools` |
-| `/collab list` | 列出所有 peer（本地 + 远程 + 隧道状态） |
-| `/collab status [name]` | 查看 peer 详细信息（含能力标签，不含 token） |
-| `/collab stop <name>` | 停止 peer。对自己：完全下线；对远程：删除条目并关隧道 |
-| `/collab start` | `/collab stop` 后重新上线当前 peer |
-| `/collab rename <name>` | 重命名当前 peer |
-| `/collab delegate <name> <task>` | 手动委托任务（不经过 LLM） |
-| `/collab templates` | 列出可用同事模板 |
-| `/collab token` | 显示当前 peer 的认证 token（仅分享给信任的 peer） |
-| `/collab remote ...` | 管理远程 SSH peer（见[跨主机协作](#跨主机协作ssh)） |
-
-### spawn 命令详解
-
-```
-/collab spawn reviewer                          # 用同事模板启动
-/collab spawn reviewer --model anthropic/claude-sonnet-4-20250514  # 指定模型
-/collab spawn reviewer --prompt "你是一个代码审查者"                # 指定系统提示
-/collab spawn reviewer --name code-checker      # 覆盖显示名称
-/collab spawn reviewer --tools read,bash,edit   # 限制工具集
-```
+- **Peer-to-peer**: no central scheduler; every peer is both client and server
+- **OOB probing**: `probe`/`ping`/`pong` are handled at the transport layer,
+  never entering the LLM context — zero token cost
+- **Filesystem trust anchor**: a peer's auth token lives in a registry file;
+  being able to read the file implies same-user trust (see [Authentication](#authentication))
+- **Message annotation**: tasks injected into a colleague's agent carry an
+  ASCII box header naming the caller, so the LLM never confuses colleague
+  messages with user prompts
 
 ---
 
-## LLM 工具
+## Commands
 
-| 工具 | 角色 | 说明 |
-|------|------|------|
-| `delegate_to_colleague` | 调用方 | 把任务委托给指定同事，等待结果。支持多轮讨论 |
-| `broadcast_to_colleagues` | 调用方 | 探测所有可达 peer 的状态和能力（OOB，零消耗） |
-| `review_by_colleague` | 调用方 | 请同事做结构化代码审查（带严重等级） |
-| `ask_colleague` | 被调用方 | 处理委托任务时，向委托方回问澄清问题 |
+All commands support tab-completion (subcommands, peer names, template names).
 
-每个工具都带 `promptSnippet`/`promptGuidelines`，让 LLM 知道何时使用；
-以及自定义 TUI 渲染（工具名、任务预览、token 用量、展开详情）。
+| Command | Description |
+|---------|-------------|
+| `/collab spawn <name\|template>` | Start a headless peer. Supports `--model`, `--prompt`, `--name`, `--tools` |
+| `/collab list` | List all peers (local + remote + tunnel status) |
+| `/collab status [name]` | Show detailed peer info (incl. capabilities, not token) |
+| `/collab stop <name>` | Stop a peer. Self: full offline. Remote: remove entry + close tunnel |
+| `/collab start` | Re-enable the current peer after `/collab stop` |
+| `/collab rename <name>` | Rename the current peer |
+| `/collab delegate <name> <task>` | Manually delegate a task (bypasses LLM) |
+| `/collab templates` | List available colleague templates |
+| `/collab token` | Show this peer's auth token (share only with trusted peers) |
+| `/collab remote ...` | Manage remote SSH peers (see [Cross-Host Collaboration](#cross-host-collaboration-ssh)) |
 
-### 多轮讨论
-
-用 `conversationId` 保持同事的会话记忆：
+### spawn Options
 
 ```
-第一轮: delegate_to_colleague { colleague: "reviewer", task: "...", conversationId: "auth-refactor" }
-第二轮: delegate_to_colleague { colleague: "reviewer", task: "...", conversationId: "auth-refactor" }
+/collab spawn reviewer                          # from a colleague template
+/collab spawn reviewer --model anthropic/claude-sonnet-4-20250514  # pick model
+/collab spawn reviewer --prompt "You are a code reviewer"          # system prompt
+/collab spawn reviewer --name code-checker      # override display name
+/collab spawn reviewer --tools read,bash,edit   # restrict tool set
 ```
 
-同事的 session 跨调用持久，能看到完整历史（含发送者名称）。
+---
 
-### 能力过滤广播
+## LLM Tools
+
+| Tool | Role | Description |
+|------|------|-------------|
+| `delegate_to_colleague` | caller | Delegate a task to a named colleague and wait. Multi-round via `conversationId` |
+| `broadcast_to_colleagues` | caller | Probe all reachable peers' status/capabilities (OOB, zero cost) |
+| `review_by_colleague` | caller | Structured code review with severity ratings |
+| `ask_colleague` | colleague | Ask a clarifying question back to the delegating peer |
+
+Each tool has `promptSnippet`/`promptGuidelines` so the LLM knows when to use
+it, plus custom TUI rendering (tool name, task preview, token usage, expandable
+details).
+
+### Multi-Round Discussions
+
+Keep a colleague's session memory with `conversationId`:
+
+```
+Round 1: delegate_to_colleague { colleague: "reviewer", task: "...", conversationId: "auth-refactor" }
+Round 2: delegate_to_colleague { colleague: "reviewer", task: "...", conversationId: "auth-refactor" }
+```
+
+The colleague's session persists across calls, including caller identity.
+
+### Capability-Filtered Broadcast
 
 ```
 broadcast_to_colleagues { capability: "security" }
-→ 只返回能力匹配 "security" 的 peer（工具名 + PI_COLLAB_CAPABILITIES 标签）
+→ only peers whose capabilities match "security" (tool names + tags)
 ```
 
 ---
 
-## 同事模板
+## Colleague Templates
 
-可复用的 peer 配置，`.md` 文件 + frontmatter：
+Reusable peer configs as `.md` files with frontmatter:
 
 ```markdown
 ---
 name: reviewer
-description: 专注正确性和安全性的代码审查者
+description: Code reviewer focused on correctness and security
 model: anthropic/claude-sonnet-4-20250514
 tools: read, bash, edit, write, grep, find, ls
 ---
 
-你是一个代码审查者。关注：
-- 正确性和边界情况
-- 安全漏洞
-- 性能影响
+You are a code reviewer. Focus on:
+- Correctness and edge cases
+- Security vulnerabilities
+- Performance implications
 
-提供带严重等级的结构化反馈。
+Provide structured feedback with severity ratings.
 ```
 
-**存放位置：**
-- `~/.pi/agent/colleagues/*.md` — 全局，所有项目可用
-- `.pi/colleagues/*.md` — 项目级，可与团队共享
+**Locations:**
+- `~/.pi/agent/colleagues/*.md` — global, available in all projects
+- `.pi/colleagues/*.md` — project-local, shareable with your team
 
-项目模板覆盖同名全局模板。
+Project templates override global templates with the same name.
 
-**使用：**
+**Usage:**
 ```
-/collab spawn reviewer                        # 使用模板的 model + system prompt
-/collab spawn reviewer --name code-checker    # 覆盖显示名称
-/collab spawn reviewer --model openai/gpt-5   # 覆盖模型
-/collab templates                             # 列出所有模板
+/collab spawn reviewer                        # use template model + prompt
+/collab spawn reviewer --name code-checker    # override display name
+/collab spawn reviewer --model openai/gpt-5   # override model
+/collab templates                             # list all templates
 ```
 
 ---
 
-## 能力广播
+## Capability Broadcasting
 
-每个 peer 自动发布能力——**活跃工具名** + **手动标签**：
+Each peer publishes its capabilities — **active tool names** + **manual tags**:
 
 ```bash
-# 手动标签
+# Manual tags
 PI_COLLAB_CAPABILITIES="code-review,typescript,security" pi -e pi-collab
 ```
 
-能力标签出现在：
-- `/collab status` 输出
-- `broadcast_to_colleagues` 结果
-- probe 的 `capability` 过滤条件
+Capabilities appear in:
+- `/collab status` output
+- `broadcast_to_colleagues` results
+- `capability` filter in probe
 
 ---
 
-## Peer 状态 Widget
+## Peer Status Widget
 
-编辑器上方实时显示 mesh 状态：
+A widget above the editor shows the mesh in real time:
 
 ```
 ── Peers ──
 ● architect (me)  claude-sonnet-4
-◉ reviewer        gpt-5.2          ← 忙碌
+◉ reviewer        gpt-5.2          ← busy
 ● dev             deepseek-v3
 ```
 
-图标：`● 空闲`（绿）、`◉ 忙碌`（黄）、`○ 不可达`（灰）。
+Icons: `● idle` (green), `◉ busy` (yellow), `○ unreachable` (dim).
 
-widget 在 turn 边界 + 心跳间隔（5s）刷新，新 peer 自动出现。远程 peer 只在
-隧道活跃时显示（死条目不刷屏）。
+The widget refreshes on turn boundaries and the heartbeat interval (5s), so
+new peers appear automatically. Remote peers show only while their tunnel is
+active (no ghost entries).
 
 ---
 
-## 跨主机协作（SSH）
+## Cross-Host Collaboration (SSH)
 
-通过 SSH 把远程 peer 的 Unix socket 转发到本地（`ssh -L`），协议和工具零改动。
+Forwards a remote peer's Unix socket to a local path (`ssh -L`), so the
+protocol and tools work unchanged.
 
-### 前提条件
+### Prerequisites
 
-1. **本机**：OpenSSH 6.7+（Unix socket 转发）——Linux/macOS
-2. **SSH 密钥认证**：密码提示已被禁用（会破坏 TUI），必须配密钥：
+1. **Local machine**: OpenSSH 6.7+ (Unix socket forwarding) — Linux/macOS
+2. **SSH key auth**: password prompts are disabled (they corrupt the TUI).
+   Set up keys:
 
 ```bash
-# 本机生成密钥（如果还没有）
+# Generate a key if you don't have one
 ssh-keygen -t ed25519
 
-# 把公钥复制到远程
-ssh-copy-id <远程用户>@<远程主机>
+# Copy your public key to the remote
+ssh-copy-id <remote-user>@<remote-host>
 
-# 验证免密登录（不需要密码即成功）
-ssh <远程用户>@<远程主机> "echo ok"
+# Verify passwordless login (must succeed without a prompt)
+ssh <remote-user>@<remote-host> "echo ok"
 ```
 
-3. **远程**：机器上运行着带 pi-collab 的 pi，且 peer 已注册
+3. **Remote**: a pi with pi-collab running, and at least one registered peer
 
-### 注册远程 peer
+### Register a Remote Peer
 
-**单个注册：**
+**One peer:**
 ```
-/collab remote add reviewer <远程用户>@<远程主机>
-```
-
-**批量注册（不带名字 = 注册远程所有 peer）：**
-```
-/collab remote add <远程用户>@<远程主机>
+/collab remote add reviewer <remote-user>@<remote-host>
 ```
 
-批量模式列出远程注册表，逐个添加 + 建立隧道，逐个报告成功/失败：
+**All peers (no name):**
+```
+/collab remote add <remote-user>@<remote-host>
+```
+
+Bulk mode lists the remote registry, adds every peer, establishes tunnels,
+and reports per-peer results:
 
 ```
 Remote sync from user@host: 2 added, 1 failed. Failed: dev
 ```
 
-### 双向注册（推荐）
+### Two-Way Registration (recommended)
 
-默认是**单向**的：谁 add 谁就能联系对方。要双方互相可见、互相联系，
-用 `add-both`：
-
-```
-/collab remote add-both <本机用户>@<本机地址> <远程用户>@<远程主机>
-```
-
-流程：
-1. 注册远程所有 peer 到本机
-2. 把**本机 peer 的记录**通过 SSH 写入远程的 `~/.pi/collab/remotes/`
-3. 远程 `/collab list` 立即可见本机，也能 delegate 给本机
-
-> **注意：** 反向联系要求远程机器也能免密 SSH 回本机（本机要开 sshd、
-> 地址对远程可达）。如果本机在 NAT 后面无公网地址，反向不通——这是网络
-> 环境限制，需等 Phase 2 的 WebSocket relay。
-
-### 管理远程 peer
+Registration is **unidirectional** by default: whoever runs `add` can reach
+the other side. To make both sides see and reach each other, use `add-both`:
 
 ```
-/collab remote list              # 查看远程 peer + 隧道状态
-/collab remote refresh <name>    # 重新拉取记录（远程重启后 token/路径变了）
-/collab remote remove <name>     # 删除条目并关闭隧道
-/collab remote prune             # 清理所有无活跃隧道的条目
-/collab stop <name>              # 对远程 peer 同样有效
+/collab remote add-both <local-user>@<local-address> <remote-user>@<remote-host>
 ```
 
-### 常见问题
+Flow:
+1. Register all remote peers locally
+2. Push this peer's record to the remote's `~/.pi/collab/remotes/` over SSH
+3. The remote's `/collab list` immediately shows this peer, and it can
+   delegate back (building its own reverse tunnel on demand)
 
-**"SSH key auth failed"** → 没配密钥。按上面 `ssh-keygen` + `ssh-copy-id` 配置。
+> **Note:** the reverse direction requires the remote to also SSH back to
+> your machine (sshd enabled, address reachable). If your machine is behind
+> NAT without a public address, the reverse direction won't work — that's a
+> network limitation, pending the Phase 2 WebSocket relay.
 
-**"remote peer not found"** → 远程机器上 pi-collab 没跑，或 peer 没注册。
-先在远程 `/collab list` 确认。
+### Managing Remote Peers
 
-**"tunnel not functional"** → 远程 socket 不存在或隧道建立失败。
-确认远程 peer 在线，然后 `/collab remote refresh <name>`。
+```
+/collab remote list              # show remote peers + tunnel status
+/collab remote refresh <name>    # re-fetch record (new token/path after restart)
+/collab remote remove <name>     # remove entry and close tunnel
+/collab remote prune             # remove entries with no active tunnel
+/collab stop <name>              # also works for remote peers
+```
 
-**远程重启后连不上** → peer 重启会生成新 token/路径。`/collab remote refresh <name>`。
+### Troubleshooting
 
----
+**"SSH key auth failed"** → no keys configured. Follow the `ssh-keygen` +
+`ssh-copy-id` steps above.
 
-## 认证机制
+**"remote peer not found"** → pi-collab isn't running on the remote, or the
+peer isn't registered. Run `/collab list` on the remote first.
 
-每个 peer 启动时生成 256-bit 随机 token，存在注册表文件
-`~/.pi/collab/peers/by-id/<peerId>.json`。连接时调用方必须先出示目标 peer
-的 token（`auth` envelope）。能读到该文件 = 同用户进程 = 信任。
+**"tunnel not functional"** → the remote socket doesn't exist or the tunnel
+failed. Confirm the remote peer is online, then `/collab remote refresh <name>`.
 
-- **ping 豁免认证**（纯连通性检测）
-- 其他所有消息（request、probe）必须先认证
-- `/collab token` 显示当前 peer 的 token，仅分享给信任的 peer
-- 远程 peer 的 token 通过 SSH 拉取（SSH 本身已认证）
-
----
-
-## 环境变量
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `PI_COLLAB_NAME` | `peer-<pid>` | peer 显示名称 |
-| `PI_COLLAB_SYSTEM_PROMPT` | 无 | 附加系统提示 |
-| `PI_COLLAB_MODEL` | 无 | 模型，如 `anthropic/claude-sonnet-4-20250514` |
-| `PI_COLLAB_CAPABILITIES` | 无 | 手动能力标签，逗号分隔 |
-| `PI_COLLAB_MAX_TURNS` | `20` | 委托任务最大 turn |
-| `PI_COLLAB_CONVERSATION_TIMEOUT_MS` | `120000` | 对话超时（毫秒） |
-| `PI_COLLAB_HEARTBEAT_INTERVAL_MS` | `5000` | 心跳间隔（毫秒） |
-| `PI_COLLAB_DIR` | `~/.pi/collab` | 数据目录（覆盖默认路径） |
+**Remote unreachable after restart** → a peer restart generates a new
+token/path. Run `/collab remote refresh <name>`.
 
 ---
 
-## 错误处理
+## Authentication
 
-所有错误带结构化错误码 + LLM 可执行提示：
+Each peer generates a 256-bit random token at startup, stored in
+`~/.pi/collab/peers/by-id/<peerId>.json`. A caller must present the target
+peer's token (`auth` envelope) before any message exchange. Being able to read
+that file implies same-user trust.
 
-| 错误码 | 含义 | 提示 |
-|--------|------|------|
-| `peer_not_found` | 名字不在注册表 | 用 `/collab list` 看可用的 peer |
-| `peer_unreachable` | peer 离线或隧道不通 | 清理后重试或 refresh |
-| `peer_busy` | 正在处理其他请求 | 稍等重试或换人 |
-| `auth_failed` | token 不匹配 | 远程重启过，用 refresh |
-| `timeout` | 处理超时 | 拆分任务或增加 maxTurns |
-| `cancelled` | 用户取消了 | 重试即可 |
-
-TUI 显示简短标签，LLM 看到完整 hint。
+- **Ping is exempt** (pure connectivity check)
+- All other messages (request, probe) require prior auth
+- `/collab token` reveals this peer's token — share only with trusted peers
+- Remote peer tokens are fetched over SSH (already authenticated by SSH itself)
 
 ---
 
-## 平台支持
+## Environment Variables
 
-| 平台 | 本地传输 | 远程传输 |
-|------|---------|---------|
-| Linux / macOS | Unix domain socket | SSH Unix socket 转发 |
-| Windows 10+ (17063+) | Windows named pipe | 暂不支持（等 WebSocket relay） |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PI_COLLAB_NAME` | `peer-<pid>` | Peer display name |
+| `PI_COLLAB_SYSTEM_PROMPT` | — | Extra system prompt |
+| `PI_COLLAB_MODEL` | — | Model, e.g. `anthropic/claude-sonnet-4-20250514` |
+| `PI_COLLAB_CAPABILITIES` | — | Manual capability tags, comma-separated |
+| `PI_COLLAB_MAX_TURNS` | `20` | Max turns for delegated tasks |
+| `PI_COLLAB_CONVERSATION_TIMEOUT_MS` | `120000` | Conversation timeout (ms) |
+| `PI_COLLAB_HEARTBEAT_INTERVAL_MS` | `5000` | Heartbeat interval (ms) |
+| `PI_COLLAB_DIR` | `~/.pi/collab` | Data directory override |
 
 ---
 
-## 文件结构
+## Error Handling
+
+All errors carry a structured code + an LLM-actionable hint:
+
+| Code | Meaning | Hint |
+|------|---------|------|
+| `peer_not_found` | name not in registry | run `/collab list` for available peers |
+| `peer_unreachable` | peer offline or tunnel down | clean up and retry, or refresh |
+| `peer_busy` | processing another request | wait and retry, or pick someone else |
+| `auth_failed` | token mismatch | remote restarted — run refresh |
+| `timeout` | processing timed out | split the task or raise maxTurns |
+| `cancelled` | user aborted | just retry |
+
+The TUI shows a short label; the LLM sees the full hint.
+
+---
+
+## Platform Support
+
+| Platform | Local transport | Remote transport |
+|----------|-----------------|------------------|
+| Linux / macOS | Unix domain socket | SSH Unix socket forwarding |
+| Windows 10+ (17063+) | Windows named pipe | Not yet (WebSocket relay planned) |
+
+---
+
+## File Structure
 
 ```
 extensions/pi-collab/
-├── index.ts              # 扩展入口：工具/命令/事件/网络
-├── types.ts              # 类型定义
-├── config.ts             # 环境变量解析
-├── errors.ts             # CollabError 结构化错误
-├── agent-context.ts      # agent loop 桥接（injectTask/agent_settled）
-├── colleagues.ts         # 同事模板系统
+├── index.ts              # entry: tools/commands/events/networking
+├── types.ts              # type definitions
+├── config.ts             # env var parsing
+├── errors.ts             # CollabError structured errors
+├── agent-context.ts      # agent loop bridge (injectTask/agent_settled)
+├── colleagues.ts         # colleague template system
 ├── protocol/
-│   ├── envelope.ts       # JSONL 信封编解码
-│   └── conversation.ts   # 会话状态机
+│   ├── envelope.ts       # JSONL envelope encode/decode
+│   └── conversation.ts   # conversation state machine
 ├── transport/
-│   ├── index.ts          # PeerTransport 接口
+│   ├── index.ts          # PeerTransport interface
 │   ├── unix-socket.ts    # Unix socket / named pipe
-│   ├── ssh.ts            # SSH 隧道 + 密钥预检
-│   └── paths.ts          # 跨平台路径
+│   ├── ssh.ts            # SSH tunnel + key preflight
+│   └── paths.ts          # cross-platform paths
 └── discovery/
-    ├── registry.ts       # 本地文件系统注册表
-    └── remotes.ts        # 远程 peer 缓存
+    ├── registry.ts       # local filesystem registry
+    └── remotes.ts        # remote peer cache
 ```
 
-数据目录 `~/.pi/collab/`：
+Data directory `~/.pi/collab/`:
 
 ```
 ~/.pi/collab/
 ├── peers/
-│   ├── by-id/<peerId>.json    # peer 记录（含 token、能力）
-│   └── by-name/<name>.json    # 名字 → peerId 映射
-├── remotes/<name>.json        # 远程 peer 缓存（SSH）
-└── socks/<peerId>.sock        # Unix socket（Linux/macOS）
+│   ├── by-id/<peerId>.json    # peer records (token, capabilities)
+│   └── by-name/<name>.json    # name → peerId mapping
+├── remotes/<name>.json        # remote peer cache (SSH)
+└── socks/<peerId>.sock        # Unix sockets (Linux/macOS)
 ```
 
 ---
 
-## 限制（Phase 1）
+## Limitations (Phase 1)
 
-- `delegate_to_colleague` 是阻塞式：同事的提问通过自然语言在结果中异步回答
-- 无中心注册表：跨主机发现靠 SSH 手动注册（`remote add` / `add-both`）
-- 同一时间只能处理一个入站请求（`pendingTask` 单槽位，并发请求排队）
-- Windows 暂不支持 SSH 远程传输
-- 后续计划：WebSocket relay（跨 NAT 无需公网地址）、非阻塞委托
+- `delegate_to_colleague` is blocking: colleague questions are answered
+  asynchronously in the next round
+- No central registry: cross-host discovery relies on manual SSH registration
+  (`remote add` / `add-both`)
+- One inbound request at a time (`pendingTask` single-slot; concurrent
+  requests queue)
+- Windows does not yet support the SSH remote transport
+- Planned: WebSocket relay (cross-NAT without public addresses),
+  non-blocking delegation
