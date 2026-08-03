@@ -797,7 +797,7 @@ function registerTools(pi: ExtensionAPI): void {
         waitForReplies?: boolean;
       };
 
-      const targets = listPeers().filter((p) => {
+      const targets = listAllPeers().filter((p) => {
         if (p.peerId === peerId) return false;
         if (filter?.length && !filter.includes(p.name)) return false;
         return p.status !== "unreachable";
@@ -1296,6 +1296,40 @@ async function remoteCommand(args: string, ctx: ExtensionCommandContext): Promis
       return;
     }
 
+    case "refresh": {
+      const name = rest.trim();
+      const existing = getRemote(name);
+      if (!name || !existing) {
+        ctx.ui.notify("Usage: /collab remote refresh <name> — re-fetch a remote peer's record (new token/path).", "warning");
+        return;
+      }
+      ctx.ui.notify(`Refreshing remote peer "${name}" from ${existing.sshTarget}...`, "info");
+      try {
+        const record = await fetchRemoteRecord(existing.sshTarget, name);
+        const updated: RemotePeer = {
+          ...existing,
+          peerId: record.peerId,
+          remoteSocketPath: record.socketPath,
+          authToken: record.authToken ?? "",
+          model: record.model,
+          capabilities: record.capabilities,
+        };
+        addRemote(updated);
+        // Re-establish the tunnel with the (possibly new) socket path
+        sshTunnelManager.closeTunnel(name);
+        const localPath = await sshTunnelManager.ensureTunnel(name, existing.sshTarget, record.socketPath);
+        ctx.ui.notify(
+          `Remote peer "${name}" refreshed. Tunnel: ${localPath}\n` +
+          `Model: ${record.model}  Capabilities: ${record.capabilities?.join(", ") ?? "none"}`,
+          "info",
+        );
+      } catch (err: unknown) {
+        const msg = err instanceof CollabError ? err.label : (err instanceof Error ? err.message : String(err));
+        ctx.ui.notify(`Failed to refresh remote peer: ${msg}`, "error");
+      }
+      return;
+    }
+
     case "list": {
       const remotes = listRemotes();
       if (remotes.length === 0) {
@@ -1312,10 +1346,11 @@ async function remoteCommand(args: string, ctx: ExtensionCommandContext): Promis
 
     default:
       ctx.ui.notify(
-        "Usage: /collab remote add|remove|list\n" +
-        "  add <name> <user@host>    — register a remote peer over SSH\n" +
-        "  remove <name>             — unregister and close tunnel\n" +
-        "  list                      — list configured remote peers",
+        "Usage: /collab remote add|remove|refresh|list\n" +
+        "  add <name> <user@host>      — register a remote peer over SSH\n" +
+        "  remove <name>               — unregister and close tunnel\n" +
+        "  refresh <name>              — re-fetch record (new token/path)\n" +
+        "  list                        — list configured remote peers",
         "warning",
       );
   }
