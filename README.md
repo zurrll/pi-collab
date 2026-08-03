@@ -13,7 +13,7 @@ pi install npm:pi-collab
 pi install git:github.com/zurrll/pi-collab@v0.2.1
 ```
 
-Or for development, load directly without installing:
+Or for development, load directly without installing:/
 
 ```bash
 pi -e ./path/to/pi-collab/extensions/pi-collab/index.ts

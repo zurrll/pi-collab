@@ -7,7 +7,8 @@
 
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { randomUUID } from "node:crypto";
-import { existsSync, unlinkSync } from "node:fs";
+import { dirname } from "node:path";
+import { existsSync, mkdirSync, unlinkSync } from "node:fs";
 import type { Envelope } from "../../types.ts";
 import { type PeerConnection, type PeerListener, type PeerTransport } from "./index.ts";
 
@@ -200,8 +201,11 @@ export class UnixSocketTransport implements PeerTransport {
 
   async listen(socketPath: string): Promise<PeerListener> {
     // On Windows with named pipes, no filesystem cleanup needed.
-    // On Unix, remove stale socket file if present.
+    // On Unix, ensure the socket directory exists and remove stale socket file.
     if (!socketPath.startsWith("\\\\")) {
+      try {
+        mkdirSync(dirname(socketPath), { recursive: true });
+      } catch { /* ignore */ }
       if (existsSync(socketPath)) {
         try { unlinkSync(socketPath); } catch { /* stale — bind will fail */ }
       }

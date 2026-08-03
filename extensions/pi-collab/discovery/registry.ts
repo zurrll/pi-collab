@@ -18,7 +18,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSyn
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { PeerRecord, PeerStatus } from "../types.ts";
-import { byIdDir, byNameDir, getPeerSocketPath, isWindows } from "../transport/paths.ts";
+import { byIdDir, byNameDir, getPeerSocketPath, isWindows, socksDir } from "../transport/paths.ts";
 
 const STALE_THRESHOLD_MS = 30_000;
 
@@ -32,8 +32,7 @@ function ensureDirs(): void {
   }
   // Unix needs a socks directory; Windows named pipes don't use filesystem
   if (!isWindows) {
-    const socksDir = join(byIdDir(), "..", "socks");
-    mkdirSync(socksDir, { recursive: true });
+    mkdirSync(socksDir(), { recursive: true });
   }
 }
 

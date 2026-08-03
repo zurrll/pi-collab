@@ -41,6 +41,14 @@ export function byNameDir(): string {
 }
 
 /**
+ * Path to the Unix socket directory (~/.pi/collab/socks).
+ * Windows named pipes do not use the filesystem.
+ */
+export function socksDir(): string {
+  return join(collabDir(), "socks");
+}
+
+/**
  * Transport-specific socket path for a peer.
  *
  * - Unix:  ~/.pi/collab/socks/<peerId>.sock
@@ -52,8 +60,8 @@ export function getPeerSocketPath(peerId: string): string {
     // Use short peerId prefix to stay within limits
     return `\\\\.\\pipe\\pi-collab-${peerId.slice(0, 8)}`;
   }
-  const socksDir = join(collabDir(), "socks");
-  return join(socksDir, `${peerId}.sock`);
+  const socksDirPath = socksDir();
+  return join(socksDirPath, `${peerId}.sock`);
 }
 
 /**
